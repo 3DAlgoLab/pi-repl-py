@@ -1,13 +1,17 @@
 // --- KernelClient over one stdio pipe: bridge.py owns ipykernel and the Jupyter protocol;
 // --- this side spawns it, speaks one JSON line at a time, and applies the output caps. ---
 
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveHelperDirs } from "./helpers-locate.js";
 
-const SILENCE_KILL_GRACE_MS = 2000;
+// An interrupt is asynchronous, and on Windows it is a Win32 event the kernel's poller thread has to
+// notice: measured at ~0.3s for a busy cell, but a kernel inside a C call can take longer. Killing on a
+// 2s grace turns a recoverable interrupt into a lost namespace, so the grace is deliberately generous --
+// the watchdog re-interrupts every tick meanwhile, so a genuinely wedged cell is still reaped.
+const SILENCE_KILL_GRACE_MS = 4000;
 /** The bridge ships at the package root, next to index.ts; src/engine is two levels deep. */
 const BRIDGE_PATH = fileURLToPath(new URL("../../bridge.py", import.meta.url));
 
@@ -114,8 +118,30 @@ function readHelperSources(dirs: string[]): { name: string; source: string }[] {
 	return out;
 }
 
+/**
+ * Kill the bridge AND the ipykernel it spawned. POSIX: the detached spawn made the bridge a group
+ * leader, so one group signal covers both. Windows has no process groups, and killing only the bridge
+ * orphans the ipykernel — which keeps holding whatever it opened (a COM apartment, an open document,
+ * a database connection) with nobody left to release it.
+ */
+export function killProcessTree(pid: number): void {
+	if (process.platform === "win32") {
+		const r = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+		if (!r.error) return;
+	}
+	try {
+		process.kill(-pid, "SIGKILL");
+	} catch {
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch {}
+	}
+}
+
 export class KernelClient {
 	private child?: ChildProcess;
+	private bridgePid_?: number;
+	private kernelProcPid_?: number;
 	private readonly timeoutMs: number;
 	private ready = false;
 	/** Serializes all kernel ops: one execute at a time, snapshots between cells. */
@@ -134,13 +160,15 @@ export class KernelClient {
 		this.timeoutMs = opts.timeoutMs ?? 0;
 	}
 
-	static async start(pythonPath: string, opts: KernelOptions = {}): Promise<KernelClient> {
-		const child = spawn(pythonPath, [BRIDGE_PATH], {
+	static async start(argv: string[], opts: KernelOptions = {}): Promise<KernelClient> {
+		if (argv.length === 0) throw new Error("no Python interpreter to launch the bridge with");
+		const child = spawn(argv[0], [...argv.slice(1), BRIDGE_PATH], {
 			cwd: resolveCwd(opts.cwd),
 			env: { ...process.env, ...(opts.env ?? {}) },
 			stdio: ["pipe", "pipe", "pipe"],
-			// its own process group: kill(-pid) reaches the kernel the bridge spawns too
-			detached: true,
+			// POSIX only: make the bridge a group leader so killProcessTree reaches the ipykernel too
+			detached: process.platform !== "win32",
+			windowsHide: true,
 		});
 		// keep stderr for post-mortems (ipykernel warnings, bridge tracebacks)
 		let stderrTail = "";
@@ -154,6 +182,10 @@ export class KernelClient {
 		child.on("exit", () => {
 			// --- bridge exit IS kernel death: settle the running cell and drop the zombie ---
 			kc.settleActive(new Error("kernel process exited"));
+			// --- every in-flight op must answer: a snapshot promise left unsettled by a dead bridge
+			// --- hangs dispose(), which hangs session_shutdown, which leaves the process group alive ---
+			kc.rejectPending(new Error("kernel process exited"));
+			kc.stopWatchdog();
 			kc.ready = false;
 			kc.child = undefined;
 			kc.rejectBootWaiters(new Error("bridge exited before it was ready"));
@@ -204,6 +236,11 @@ export class KernelClient {
 			case "ready": {
 				const helpers = Array.isArray(msg.helpers) ? (msg.helpers as HelperLoadResult[]) : [];
 				this.helperBootReport = helpers;
+				// Three pids matter on Windows: the venv launcher we spawned (child.pid), the bridge process,
+				// and the ipykernel child that executes cells and holds live handles. Only the last one is what a
+				// stray DraftSight connection belongs to.
+				if (typeof msg.pid === "number") this.bridgePid_ = msg.pid;
+				if (typeof msg.kernel_pid === "number") this.kernelProcPid_ = msg.kernel_pid;
 				this.readyWaiters.shift()?.resolve(msg);
 				break;
 			}
@@ -240,6 +277,12 @@ export class KernelClient {
 					this.pending.delete(id);
 					if (pending.timer) clearTimeout(pending.timer);
 					pending.reject(error);
+				} else if (id !== undefined && this.activeCell?.id === id) {
+					// bridge.py answers a failed op with the op's id ("unknown op", an exec that raised
+					// inside the bridge). Only pending ops are routed by id, so a cell that gets an
+					// error line instead of a result would sit unsettled forever — the silence watchdog
+					// is off unless PI_REPL_TIMEOUT_MS is set, and every later cell queues behind it.
+					this.settleFromBridgeError(this.activeCell!, error.message);
 				} else if (this.readyWaiters.length > 0) {
 					this.readyWaiters.shift()!.reject(error); // boot failure
 				} else {
@@ -253,7 +296,7 @@ export class KernelClient {
 	}
 
 	private send(msg: object): void {
-		this.child?.stdin?.write(JSON.stringify(msg) + "\n");
+		this.child?.stdin?.write(`${JSON.stringify(msg)}\n`);
 	}
 
 	/** Resolves on the bridge's ready event; rejects on a boot error or a bridge exit.
@@ -320,7 +363,7 @@ export class KernelClient {
 			reject: () => {},
 		};
 		this.activeCell = active;
-		const onAbort = () => this.interrupt();
+		const onAbort = () => this.requestInterrupt();
 		opts.signal?.addEventListener("abort", onAbort, { once: true });
 
 		this.send({ op: "exec", id, code });
@@ -329,12 +372,38 @@ export class KernelClient {
 		return new Promise<CellResult>((resolve, reject) => {
 			active.resolve = resolve;
 			active.reject = reject;
-			if (opts.signal?.aborted) this.interrupt();
+			if (opts.signal?.aborted) this.requestInterrupt();
 		}).finally(() => {
 			if (this.activeCell === active) this.activeCell = undefined;
 			this.stopWatchdog();
 			opts.signal?.removeEventListener("abort", onAbort);
 		});
+	}
+
+	/** A cell the bridge refused: report it as a failed cell, not a transport rejection. */
+	private settleFromBridgeError(active: ActiveCell, message: string): void {
+		if (active.settled) return;
+		active.settled = true;
+		active.status = "error";
+		active.error = { name: "BridgeError", message, stack: [] };
+		this.stopWatchdog();
+		active.resolve({
+			stdout: active.stdout.join(""),
+			stderr: active.stderr.join(""),
+			result: undefined,
+			error: active.error,
+			status: "error",
+			truncated: { stdout: active.stdoutTruncated, stderr: active.stderrTruncated },
+		});
+	}
+
+	/** Reject every queued request op (snapshot, restore, listNames, shutdown). */
+	private rejectPending(error: Error): void {
+		for (const [id, pending] of this.pending) {
+			if (pending.timer) clearTimeout(pending.timer);
+			this.pending.delete(id);
+			pending.reject(error);
+		}
 	}
 
 	private settleActive(error: Error): void {
@@ -366,13 +435,23 @@ export class KernelClient {
 			// the caller withdrew; report aborted even if the cell raised
 			status = "aborted";
 		} else if (active.timedOut) {
-			// silence watchdog tripped: the cell was still running, not done
-			status = "error";
-			active.error = {
-				name: "Timeout",
-				message: "cell did not finish within the silence window and may still be running",
-				stack: ["[cell timed out]"],
-			};
+			// --- the watchdog already interrupted this cell. If the kernel answered by cutting it, say so:
+			// --- ipykernel reports an interrupted exec as an error named KeyboardInterrupt (status "aborted"
+			// --- is reserved for cells that never started), and in that case the kernel is idle and the
+			// --- namespace is intact. Only a cell that outran the interrupt and answered normally is a
+			// --- genuine timeout -- that one may still be running, and that is the case worth alarming about ---
+			const cutByInterrupt = content.status === "aborted" || active.error?.name === "KeyboardInterrupt";
+			if (cutByInterrupt) {
+				status = "aborted";
+				active.error = active.error ?? { name: "KeyboardInterrupt", message: "cell interrupted", stack: [] };
+			} else {
+				status = "error";
+				active.error = {
+					name: "Timeout",
+					message: "cell did not finish within the silence window and may still be running",
+					stack: ["[cell timed out]"],
+				};
+			}
 		}
 		active.status = status;
 		active.resolve({
@@ -412,7 +491,7 @@ export class KernelClient {
 				const quiet = Date.now() - active.lastActivity;
 				if (quiet >= this.timeoutMs && !active.settled) {
 					active.timedOut = true;
-					this.interrupt();
+					this.requestInterrupt();
 					// a cell that swallows the interrupt never replies; escalate to a kill so the queue frees
 					this.silenceKillTimer ??= setTimeout(() => {
 						if (!active.settled) this.kill();
@@ -436,8 +515,13 @@ export class KernelClient {
 		}
 	}
 
-	/** Genuine KeyboardInterrupt via the bridge's control channel; the kernel survives. */
-	interrupt(): void {
+	/**
+	 * Ask the bridge to raise KeyboardInterrupt in the active cell. This method sends one op; the bridge
+	 * picks the mechanism per platform -- a Win32 event handle the kernel's poller thread already waits
+	 * on (jupyter_client 8.x dropped interrupt() from BlockingKernelClient and the control channel is a
+	 * no-op there), or the control-channel request elsewhere. Measured ~0.3s to settle for a busy cell.
+	 */
+	requestInterrupt(): void {
 		this.send({ op: "interrupt" });
 	}
 
@@ -497,17 +581,10 @@ export class KernelClient {
 	kill(): void {
 		this.stopWatchdog();
 		this.settleActive(new Error("kernel killed"));
+		this.rejectPending(new Error("kernel killed"));
+		this.ready = false;
 		const pid = this.child?.pid;
-		if (pid !== undefined) {
-			// group kill: the bridge's kernel is in the same process group (detached spawn)
-			try {
-				process.kill(-pid, "SIGKILL");
-			} catch {
-				try {
-					process.kill(pid, "SIGKILL");
-				} catch {}
-			}
-		}
+		if (pid !== undefined) killProcessTree(pid);
 		this.child = undefined;
 	}
 
@@ -520,7 +597,31 @@ export class KernelClient {
 		return this.helperBootReport;
 	}
 
+	/** A cell is executing right now; a shutdown snapshot would queue behind it. */
+	get hasActiveCell(): boolean {
+		return this.activeCell !== undefined && !this.activeCell.settled;
+	}
+
 	get isRunning(): boolean {
 		return this.ready && this.child !== undefined && this.child.exitCode === null;
+	}
+
+	/**
+	 * Process roles, all three for diagnostics. On POSIX they collapse to two numbers; on Windows a venv's
+	 * python.exe re-execs and jupyter_client spawns ipykernel as a grandchild, so the pid holding a live COM
+	 * proxy is `kernelPid`, and `taskkill /T` is the only thing that reaches it.
+	 */
+	get pid(): number | undefined {
+		return this.child?.pid;
+	}
+
+	/** The bridge process itself (reads the op stream, owns the ZMQ channels). */
+	get bridgePid(): number | undefined {
+		return this.bridgePid_;
+	}
+
+	/** The ipykernel subprocess: where cells run and where live handles live. */
+	get kernelPid(): number | undefined {
+		return this.kernelProcPid_;
 	}
 }

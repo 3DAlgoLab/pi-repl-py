@@ -1,6 +1,6 @@
 {
 	"name": "pi-repl-py",
-	"version": "0.9.0",
+	"version": "0.10.1",
 	"type": "module",
 	"description": "A pi extension with a single tool: execute, running a TypeScript host with a persistent Python (ipykernel) evaluator and a user-configurable toolbox of functions.",
 	"keywords": [
@@ -13,11 +13,11 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/k3-2o/pi-repl-py.git"
+		"url": "git+https://github.com/3DAlgoLab/pi-repl-py.git"
 	},
-	"homepage": "https://github.com/k3-2o/pi-repl-py",
+	"homepage": "https://github.com/3DAlgoLab/pi-repl-py",
 	"bugs": {
-		"url": "https://github.com/k3-2o/pi-repl-py/issues"
+		"url": "https://github.com/3DAlgoLab/pi-repl-py/issues"
 	},
 	"pi": {
 		"extensions": [
@@ -37,7 +37,7 @@
 		"node": ">=22"
 	},
 	"scripts": {
-		"typecheck": "tsc --noEmit",
+		"typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
 		"format": "biome format --write .",
 		"lint": "biome check .",
 		"knip": "knip",
@@ -46,7 +46,6 @@
 		"test:integ": "bun test test/engine.integration.test.ts",
 		"postinstall": "node scripts/setup-venv.mjs"
 	},
-	"dependencies": {},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*",
 		"@earendil-works/pi-tui": "*",
@@ -56,6 +55,7 @@
 		"@biomejs/biome": "2.3.5",
 		"@mariozechner/pi-coding-agent": "npm:@earendil-works/pi-coding-agent@^0.84.0",
 		"@mariozechner/pi-tui": "npm:@earendil-works/pi-tui@^0.84.0",
+		"@types/bun": "^1.4.4",
 		"@types/node": "^22.0.0",
 		"knip": "^6.32.0",
 		"typebox": "^1.3.11",

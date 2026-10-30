@@ -8,6 +8,9 @@ dist/
 .nvim/
 
 __pycache__/
+# scratch probes written while working the Windows/Fabric bugs; not part of the package
+.smoke/
+.probe/
 *.pyc
 .venv/
 .pytest_cache/
@@ -18,3 +21,6 @@ AGENTS.md
 AUDIT-FINDINGS.md
 .pi/
 .agents/
+
+# editor-local settings
+.vscode/

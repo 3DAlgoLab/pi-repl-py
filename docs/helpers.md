@@ -28,7 +28,7 @@ helpers fill in whatever the project does not define. One file name appears once
 tool prompt and once in the kernel.
 
 After adding, changing, renaming, or disabling a helper, run `/reload` or start a new
-`pi --repl` session. The running evaluator does not watch the directories for changes.
+`pi` session. The running evaluator does not watch the directories for changes.
 
 ## A small function helper
 

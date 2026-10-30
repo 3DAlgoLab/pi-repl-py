@@ -4,17 +4,11 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
+import { resolveHelperDirs } from "./src/engine/helpers-locate.js";
 import { EngineManager, pruneOrphanedSnapshotDirs, pruneSnapshotDirs } from "./src/engine/index.js";
-import { buildHelpersPromptSection } from "./src/extension/helpers.js";
+import { formatDiagnostics, hostMode, toolsForHost } from "./src/extension/diagnostics.js";
+import { buildHelpersPromptSection, listHelperNamesForCwd } from "./src/extension/helpers.js";
 import { buildPromptGuidelines, executePromptSnippet, executeToolDescription } from "./src/extension/prompt.js";
-import {
-	type ReplToggle,
-	replArgumentCompletions,
-	replToast,
-	replUsageMessage,
-	restoredTools,
-	parseReplToggle,
-} from "./src/extension/repl-command.js";
 import { ExecuteCellComponent, type ExecuteDetails, type ExecuteRenderState } from "./src/extension/render.js";
 import {
 	EngineLifecycle,
@@ -30,6 +24,12 @@ const executeSchema = Type.Object({
 	code: Type.String({
 		description: "Python source for this cell; stdout, stderr, and the last-expression result are returned.",
 	}),
+	maxOutputChars: Type.Optional(
+		Type.Number({
+			description:
+				"Optional cap on characters returned across stdout and stderr. Set it lower when this call comes from another code-mode whose own output budget is shared across nested results (a pi-fabric program, say); the session default is 46080 and can be changed with PI_REPL_MAX_OUTPUT_CHARS.",
+		}),
+	),
 });
 
 function syncRenderState(
@@ -62,18 +62,12 @@ function composeErrorLines(error: { name: string; message: string; stack: string
 }
 
 export default function (pi: ExtensionAPI) {
-	pi.registerFlag("repl", {
-		type: "boolean",
-		description: "Single execute tool backed by a persistent Python evaluator; replaces the default tool surface",
-	});
-	// Flag only lands post-factory; gate per event. PI_REPL_FORCE is the dev escape.
-	// /repl on|off flips replMode mid-session; the flag only seeds the starting mode.
-	let replMode = pi.getFlag("repl") === true || process.env.PI_REPL_FORCE === "1";
-	const active = () => replMode;
+	// --- host detection, not a mode option: pi-fabric owns the model-facing code-mode when it is loaded (its own
+	// --- code gates on this same check), and this extension becomes the durable-state sidecar it calls. No flag,
+	// --- no /repl on-off, no dormant state: the same binary is correct under either host.
+	const mode = () => hostMode(pi.getActiveTools());
 
 	let location = { cwd: process.cwd(), sessionFile: undefined as string | undefined };
-	/** Active tools captured when /repl on takes over; /repl off puts them back. */
-	let stockTools: string[] | undefined;
 	// Pi rebuilds thrown errors as bare text; stash details to re-attach in tool_result.
 	const pendingErrorResults = new Map<string, { details: ExecuteDetails }>();
 
@@ -132,22 +126,17 @@ export default function (pi: ExtensionAPI) {
 	// --- no custom prompt: pi's default prompt stands; active tools collapse to execute, so REPL knowledge lives on the tool ---
 
 	pi.on("session_start", async (_event, ctx) => {
-		// --- both branches know the session: /repl on in a stock session needs the session file for its state dir ---
 		location = { cwd: ctx.cwd, sessionFile: ctx.sessionManager.getSessionFile() ?? undefined };
-		if (!active()) {
-			// --- capture the stock loadout before dropping execute: /repl off needs it, and this is
-			// the one point every stock session passes through (guarded: an empty capture must not
-			// mask the built-ins fallback) ---
-			const current = pi.getActiveTools().filter((name) => name !== "execute");
-			if (current.length > 0) stockTools = current;
-			pi.setActiveTools(pi.getActiveTools().filter((name) => name !== "execute"));
+		// --- one write to the tool surface, derived from the host: takeover collapses to execute, a Fabric host
+		// --- keeps every other tool and drops execute (a second code-mode in the prompt is the conflict itself)
+		const current = pi.getActiveTools();
+		const next = toolsForHost(current, mode());
+		if (next.join("\n") !== current.join("\n")) pi.setActiveTools(next);
+		if (mode() !== "takeover") {
+			// --- a Fabric session boots no Python until a program actually asks: Fabric's own programs are one-shot,
+			// --- so paying a 3 s boot + a resident kernel for a session that never calls the sidecar is pure waste
 			return;
 		}
-		// --- repl start: remember what the stock loadout was, for /repl off (guard the repeat:
-		// a loadout already collapsed to execute-only must not overwrite the capture) ---
-		const current = pi.getActiveTools().filter((name) => name !== "execute");
-		if (current.length > 0) stockTools = current;
-		pi.setActiveTools(["execute"]);
 		// --- warm the engine in the background; acquire() dedupes, so the first execute awaits this same boot ---
 		const sessionKey = location.sessionFile ? conversationName(location.sessionFile) : undefined;
 		void lifecycle.acquire("startup", sessionKey).catch(() => {
@@ -155,40 +144,29 @@ export default function (pi: ExtensionAPI) {
 		});
 	});
 
-	// --- the mode switch: tools are transcript-owned since pi 0.86, so toggling mid-session appends a delta instead of rewriting the prompt head ---
+	// --- /repl reports the kernel; it used to flip a mode, and that flip was the hazard (restoring a captured
+	// --- tool loadout could silently drop another extension's tools, including fabric_exec)
 	pi.registerCommand("repl", {
-		description: "Toggle the persistent Python REPL: /repl on or /repl off",
-		getArgumentCompletions: replArgumentCompletions,
-		handler: async (args, ctx) => {
-			const toggle: ReplToggle | undefined = parseReplToggle(args);
-			if (!toggle) {
-				ctx.ui.notify(replUsageMessage(replMode), "warning");
-				return;
-			}
-			const on = toggle === "on";
-			if (on === replMode) {
-				// --- idempotent: a repeat /repl on must not overwrite the captured stock loadout with execute-only ---
-				ctx.ui.notify(replToast(toggle), "info");
-				return;
-			}
-			replMode = on;
-			if (toggle === "on") {
-				// --- remember the stock loadout before it collapses to execute-only (same guard as
-				// session_start: an execute-only loadout must not capture as []) ---
-				const current = pi.getActiveTools().filter((name) => name !== "execute");
-				if (current.length > 0) stockTools = current;
-				pi.setActiveTools(["execute"]);
-				// warm the engine now so the first cell doesn't pay the boot; acquire() dedupes
-				const sessionKey = location.sessionFile ? conversationName(location.sessionFile) : undefined;
-				// --- swallow the warm boot's rejection: boot/revive are handled on the execute path ---
-				void lifecycle.acquire("startup", sessionKey).catch(() => {});
-			} else {
-				// restore what was active before repl took over (captured at /repl on), so other
-				// extensions' active tools come back too; fall back to the built-ins
-				pi.setActiveTools(restoredTools(stockTools));
-				// keep the engine alive: switching back is instant and the namespace is intact
-			}
-			ctx.ui.notify(replToast(toggle), "info");
+		description: "Show the Python kernel's state: host, interpreter, pid, helpers, snapshot",
+		handler: async (_args, ctx) => {
+			const engine = lifecycle.peek();
+			ctx.ui.notify(
+				formatDiagnostics({
+					host: mode(),
+					enginePresent: engine !== undefined,
+					kernelState: engine?.bootState,
+					pid: engine?.pid,
+					bridgePid: engine?.bridgePid,
+					kernelPid: engine?.kernelPid,
+					interpreter: engine?.pythonInterpreter,
+					interpreterSource: engine?.pythonSource,
+					helperNames: listHelperNamesForCwd(ctx.cwd ?? location.cwd),
+					helperDirs: resolveHelperDirs(ctx.cwd ?? location.cwd),
+					snapshotPath: engine?.snapshotPath,
+					snapshotPresent: engine?.hasSnapshotHistory(),
+				}),
+				"info",
+			);
 		},
 	});
 
@@ -207,7 +185,9 @@ export default function (pi: ExtensionAPI) {
 
 	// --- pi gates skills on the read tool (absent in repl); the helper roster is rebuilt per session from the session cwd, not the launch cwd, so resumes advertise what the kernel loaded ---
 	pi.on("before_agent_start", (event, ctx) => {
-		if (!active()) return;
+		// --- under a Fabric host, Fabric composes the prompt; appending our roster there would advertise a tool
+		// --- the model cannot call. The sidecar is advertised to programs, not to the model.
+		if (mode() !== "takeover") return;
 		const skillsPrompt = withSkillsBlock(event.systemPrompt, event.systemPromptOptions?.skills ?? []);
 		let systemPrompt = skillsPrompt ?? event.systemPrompt;
 		const helpersBlock = buildHelpersPromptSection(ctx?.cwd ?? process.cwd());
@@ -244,11 +224,6 @@ export default function (pi: ExtensionAPI) {
 			return new ExecuteCellComponent(state, _theme, "body");
 		},
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			if (!active()) {
-				throw new Error(
-					"pi-repl is dormant in this session. Start pi with --repl, or run /repl on, to use execute.",
-				);
-			}
 			if (ctx?.cwd) location = { cwd: ctx.cwd, sessionFile: ctx.sessionManager?.getSessionFile?.() ?? undefined };
 			// --- establish the body slot at call time so Ctrl+O can expand a live, still-streaming cell ---
 			onUpdate?.({ content: [], details: {} });
@@ -259,6 +234,7 @@ export default function (pi: ExtensionAPI) {
 				let streamed = "";
 				const r = await m.execute(params.code, {
 					signal,
+					maxOutputChars: params.maxOutputChars,
 					onStream: (chunk) => {
 						streamed += chunk;
 						onUpdate?.({ content: [{ type: "text", text: streamed }], details: {} });

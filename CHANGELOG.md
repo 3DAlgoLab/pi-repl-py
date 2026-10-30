@@ -1,3 +1,45 @@
+## [0.10.1] - 2026-10-30
+
+### Added
+
+- `PI_REPL_MAX_OUTPUT_CHARS` sets the per-cell output cap for the session (46,080 by default; values below 512
+  are ignored rather than honoured, because such output is unreadable), and `execute` takes a `maxOutputChars`
+  argument for a single call. The reason is nesting: a caller with its own output ceiling — a pi-fabric program
+  bounding every nested result near 50,000 characters — can now spend a fraction of its budget on one cell
+  instead of having one `print` consume all of it.
+
+### Removed (breaking)
+
+- The `--repl` flag, `PI_REPL_FORCE`, and the dormant/active split. The extension is always live and
+  the host is detected rather than configured. `/repl on` and `/repl off` go with them — including the
+  stock-loadout capture and its hardcoded fallback tool list, which could restore a set of tools
+  missing whatever another extension had added. `/repl` stays, as read-only diagnostics.
+
+### Changed
+
+- Host-aware tool surface. Under pi-fabric, `fabric_exec` stays active and `execute` leaves the active
+  set: a program reaches the persistent kernel as `extensions["pi-repl-py"].execute`, and the model's
+  prompt carries exactly one code-mode. Under plain pi, active tools collapse to `execute` as before,
+  and the bridge keeps `bash`/`read`/`edit`/`write` callable from cells.
+- The engine boots lazily under a sidecar host — a session that never asks for Python starts no process.
+- Windows interrupts and teardown. `SIGINT` is unsupported on Windows and jupyter_client 8 keeps the
+  kernel pid on `km.provisioner.pid`, so an interrupt sends `CTRL+BREAK` to the process group (or the
+  kernel pid) and teardown kills the tree with `taskkill /PID <root> /T /F`. A venv's `python.exe` is a
+  launcher stub that re-execs, so killing one pid used to leave an orphan kernel holding COM handles —
+  which is what locked DraftSight.
+
+### Fixed
+
+- Interpreter resolution on Windows: `Scripts/python.exe` instead of `bin/python3`, `py -3` probed,
+  `where.exe` for PATH lookups, and a dependency probe that never executes environment code.
+- `pyproject.toml` used an invalid PEP 508 marker (bare `os.name == "nt"`) that uv rejected, and
+  omitted `psutil`, which ipykernel needs on every platform.
+- Timeout units: `PI_REPL_TIMEOUT_MS` is now milliseconds; it was multiplied by 1000 before use.
+- README and `docs/ARCHITECTURE.md` claimed `bash(...)`, `read(...)`, `edit(...)` and `write(...)` stay
+  callable from inside a cell. They are not: commit 1708b75 retired that toolbox in favour of the helpers-only
+  model, and nothing injects tool callables into the kernel namespace. Both now describe what is really there —
+  plain Python (`subprocess.run`, `pathlib`, `!cmd`, `%%bash`).
+
 ## [0.9.0] - 2026-09-29
 
 ### Added

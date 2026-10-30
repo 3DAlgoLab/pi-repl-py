@@ -148,6 +148,14 @@ export class EngineLifecycle<E extends RevivableEngine> {
 
 	constructor(private readonly deps: EngineLifecycleDeps<E>) {}
 
+	/**
+	 * The bound engine without booting one, for read-only diagnostics. /repl must be able to report "no kernel
+	 * is running" without paying a 3 s boot to answer the question.
+	 */
+	peek(): E | undefined {
+		return this.engine;
+	}
+
 	/** Race one boot (kernel start + helpers preload) against the deadline; a failed start is soft — the first cell observes it and rebuilds. */
 	private bootOnce(engine: E, deadlineMs: number): Promise<boolean> {
 		const work = Promise.resolve()

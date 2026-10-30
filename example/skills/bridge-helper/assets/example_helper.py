@@ -78,7 +78,7 @@ class _Pi:
     def _call(self, tool, params):
         if not self._sock_path:
             raise PiBridgeError(
-                "pi bridge unavailable: %s is not set. Start pi with --repl and check that "
+                "pi bridge unavailable: %s is not set. Start pi and check that "
                 "the pi-bridge extension loaded." % SOCKET_ENV,
                 "transport",
             )

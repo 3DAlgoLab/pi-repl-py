@@ -1,0 +1,13 @@
+{
+	// The test tree is deliberately separate: test/units.test.ts casts KernelClient's private constructor
+	// into a seam and drives it with fake bridge objects, which the strict production project would reject.
+	// Splitting it out keeps `just types` honest about src/ while still typechecking the specs — the test tree
+	// had been quietly excluded, and three TS2339 errors in units.test.ts lived there undetected.
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"types": ["node", "bun"],
+		"noUnusedLocals": false,
+		"noUnusedParameters": false
+	},
+	"include": ["test/**/*.ts"]
+}

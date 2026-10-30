@@ -46,7 +46,7 @@ def main():
     args = ap.parse_args()
     if not args.sock:
         raise SystemExit(
-            "PI_BRIDGE_SOCK is not set. Start pi with --repl so the pi-bridge "
+            "PI_BRIDGE_SOCK is not set. Start pi so the pi-bridge "
             "extension boots and sets it."
         )
     s = connect(args.sock)

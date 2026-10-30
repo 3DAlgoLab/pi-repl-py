@@ -9,7 +9,7 @@ Protocol (JSON lines; host -> bridge on stdin, bridge -> host on stdout):
        {"op":"listNames","id":str}                                     current public names
        {"op":"interrupt"}                                              KeyboardInterrupt in the kernel
        {"op":"shutdown","id":str}                                      graceful teardown, then exit 0
-  out: {"type":"ready","helpers":[{"name":str,"ok":bool,"error":str?}]}      kernel up, helpers loaded
+  out: {"type":"ready","pid":int,"kernel_pid":int,"helpers":[{"name":str,"ok":bool,"error":str?}]}      kernel up, helpers loaded
        {"type":"stream","id":str,"name":"stdout"|"stderr","text":str}        cell output, streamed
        {"type":"result","id":str,"status":"ok"|"error"|"aborted",            cell settled
               "result":str?,"error":{"name":str,"message":str,"stack":[str]}?}
@@ -160,6 +160,15 @@ class Bridge:
 
     # ----- kernel lifecycle -----
 
+    def kernel_pid(self):
+        """The ipykernel subprocess pid, or None before it is up. jupyter_client 8 keeps it on the
+        provisioner; older releases put it on the manager."""
+        if self.km is None:
+            return None
+        provisioner = getattr(self.km, "provisioner", None)
+        pid = getattr(provisioner, "pid", None) if provisioner is not None else None
+        return pid or getattr(self.km, "pid", None)
+
     def start_kernel(self):
         km = KernelManager(kernel_name="python3")
         try:
@@ -294,10 +303,43 @@ class Bridge:
                 break
 
     def interrupt(self):
+        if os.name == "nt" and self._interrupt_windows():
+            return
         # BlockingKernelClient has no interrupt() in jupyter_client 8.x; the old host sent
         # interrupt_request on the control channel directly — do the same
         msg = self.kc.session.msg("interrupt_request", content={})
         self.kc.control_channel.send(msg)
+
+    def _interrupt_windows(self):
+        """Interrupt a Windows kernel, which does not honour the control-channel request: ipykernel logs
+        "Interrupt message not supported on Windows" and the cell keeps running, leaving the host's
+        timeout watchdog one option only — a kill that throws the namespace away.
+
+        When jupyter_client launched the kernel it created a Win32 event (handed to the kernel as
+        JPY_INTERRUPT_EVENT, where ParentPollerWindows waits on it) and attached the handle to the
+        kernel's Popen. Setting that event leaves the kernel — and every handle it holds — alive.
+
+        What it does not do is enter the running cell. The event makes ipykernel call interrupt_main(),
+        which raises KeyboardInterrupt at the cell's *next bytecode boundary*: measured on Windows, a loop of
+        0.05s sleeps dies ~0.2s after the event while a single time.sleep(3) runs the full 3s first. A cell
+        parked inside one C call (a hung DraftSight RPC, a socket read) never regains a boundary and is
+        unaffected — only killing the kernel reclaims that, and the host says so rather than reporting a
+        clean abort.
+        """
+        try:
+            proc = getattr(getattr(self.km, "provisioner", None), "process", None)
+            handle = getattr(proc, "win32_interrupt_event", None) if proc else None
+            if handle:
+                from jupyter_client.win_interrupt import send_interrupt
+
+                send_interrupt(handle)
+                return True
+            # No handle on this launcher: let jupyter_client route the kernel spec's interrupt_mode.
+            self.km.interrupt_kernel()
+            return True
+        except Exception as e:
+            sys.stderr.write("windows interrupt unavailable: %s\n" % e)
+            return False
 
     def kernel_alive(self):
         try:
@@ -360,7 +402,10 @@ class Bridge:
                 err = res["error"] or {}
                 report.append({"name": h["name"], "ok": False,
                                "error": (err.get("name") + ": " + err.get("message", "")).strip() or "failed to load"})
-        self.emit({"type": "ready", "helpers": report})
+        # three pids matter on Windows: the venv launcher we were spawned as, this bridge process,
+        # and the ipykernel child that actually runs cells and holds live handles (COM proxies die with it).
+        # jupyter_client 8 moved the kernel pid to km.provisioner.pid; the old km.pid is gone.
+        self.emit({"type": "ready", "pid": os.getpid(), "kernel_pid": self.kernel_pid(), "helpers": report})
 
     def op_exec(self, op):
         res = self.run_cell(op["code"], emit_stream=True, emit_id=op["id"])

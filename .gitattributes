@@ -1,0 +1,10 @@
+# No .gitattributes + core.autocrlf=true on Windows meant a checkout where biome's format gate could never
+# pass (it wants LF; the worktree had CRLF), and it is the reason `just check` is ungreen on Windows.
+# Pin LF in the worktree for everyone; text detection stays automatic for diffs.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.snapshot binary

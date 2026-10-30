@@ -10,11 +10,12 @@
  * which is why this suite is slow and kept out of `just check`.
  */
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inflateSync } from "node:zlib";
-import { EngineManager } from "../src/engine/index.ts";
+import { EngineManager, resolvePython } from "../src/engine/index.ts";
 import { EngineLifecycle, formatForkToast } from "../src/extension/session-engine.ts";
 import { inheritForkSnapshot, resolveStateDir } from "../src/extension/state-layout.ts";
 
@@ -42,10 +43,9 @@ function engine(opts: Record<string, unknown>) {
 let bootFactorCache: number | undefined;
 function slowFactor(baseMs: number): number {
 	if (bootFactorCache === undefined) {
-		const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
-		const py = process.env.PYTHON ?? `${process.env.HOME}/.pi/agent/pi-repl/venv/bin/python3`;
+		const argv = process.env.PYTHON ? [process.env.PYTHON] : resolvePython().argv;
 		const t0 = Date.now();
-		const r = spawnSync(py, ["-c", "import ipykernel"], { timeout: 30_000 });
+		const r = spawnSync(argv[0], [...argv.slice(1), "-c", "import ipykernel"], { timeout: 30_000 });
 		const cold = Date.now() - t0;
 		if (r.status !== 0) return baseMs; // measurement failed: keep the base deadline
 		// a healthy laptop imports ipykernel in <1s; Termux takes ~2s. Scale linearly against
@@ -264,7 +264,7 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 		{ timeout: 90_000 },
 		async () => {
 			const d = tempDir();
-			const snap = { path: join(d, "ns.snapshot"), debounceMs: 200 };
+			const snap = { path: join(d, "ns.snapshot") };
 			const m1 = engine({ cwd: d, snapshot: snap });
 			await m1.execute("saved = {'a': 42, 'big': list(range(200_000))}");
 			await m1.snapshotState();
@@ -296,13 +296,13 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 
 	test("a variable set in one engine survives restart via the snapshot file", { timeout: 60_000 }, async () => {
 		const d = tempDir();
-		const snap = { path: join(d, "ns.snapshot"), debounceMs: 200 };
+		const snap = { path: join(d, "ns.snapshot") };
 		const m1 = engine({ cwd: d, snapshot: snap });
 
 		const r1 = await m1.execute("saved = {'a': 42, 'b': 'hello'}");
 		expect(r1.status).toBe("ok");
 
-		// wait for the debounced auto-snapshot to fire
+		// wait for the auto-snapshot (name-diff gate) to fire
 		await new Promise((resolve) => setTimeout(resolve, 800));
 		await m1.snapshotState();
 
@@ -322,7 +322,7 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 		async () => {
 			const d = tempDir();
 			// tiny caps: the huge binding exceeds the per-entry cap and is skipped AT SAVE time
-			const snap = { path: join(d, "ns.snapshot"), debounceMs: 200, maxBytes: 1000 };
+			const snap = { path: join(d, "ns.snapshot"), maxBytes: 1000 };
 			const m1 = engine({ cwd: d, snapshot: snap });
 
 			const r1 = await m1.execute("import os\nhuge = os.urandom(5000)\nkept = {'k': 1}");
@@ -346,7 +346,7 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 
 	test("same-name mutations survive a crash via the periodic refresh", { timeout: 60_000 }, async () => {
 		const d = tempDir();
-		const snap = { path: join(d, "ns.snapshot"), debounceMs: 50, periodMs: 200 };
+		const snap = { path: join(d, "ns.snapshot"), periodMs: 200 };
 		const m1 = engine({ cwd: d, snapshot: snap });
 
 		const r1 = await m1.execute("data = {'k': 1}");
@@ -374,7 +374,7 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 
 	test("snapshot files are version 4 with zlib-compressed cloudpickle payloads", { timeout: 60_000 }, async () => {
 		const d = tempDir();
-		const snap = { path: join(d, "ns.snapshot"), debounceMs: 200 };
+		const snap = { path: join(d, "ns.snapshot") };
 		const m1 = engine({ cwd: d, snapshot: snap });
 		await m1.execute("payload_v = {'a': 1}");
 		await m1.snapshotState();
@@ -392,7 +392,7 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 
 	test("a version 2 snapshot file (plain pickles) still restores", { timeout: 60_000 }, async () => {
 		const d = tempDir();
-		const snap = { path: join(d, "ns.snapshot"), debounceMs: 200 };
+		const snap = { path: join(d, "ns.snapshot") };
 		const m1 = engine({ cwd: d, snapshot: snap });
 		await m1.execute("legacy = {'v': 7}");
 		await m1.snapshotState();
@@ -432,7 +432,7 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 
 		// parent session: real engine, real snapshot
 		const parentSnap = resolveStateDir(stateRoot, parentFile).snapshotPath;
-		const m1 = engine({ cwd: d, snapshot: { path: parentSnap, debounceMs: 200 } });
+		const m1 = engine({ cwd: d, snapshot: { path: parentSnap } });
 		await m1.execute("inherited = {'fork': 'yes', 'n': 42}");
 		await m1.snapshotState();
 		await m1.kill();
@@ -445,7 +445,7 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 		inheritForkSnapshot(stateRoot, forkFile, forkSnap);
 
 		// the fork's engine restores like any resume: same revive, same notice path
-		const m2 = engine({ cwd: d, snapshot: { path: forkSnap, debounceMs: 200 } });
+		const m2 = engine({ cwd: d, snapshot: { path: forkSnap } });
 		const restore = await m2.restoreState();
 		expect(restore?.restored).toContain("inherited");
 		const r = await m2.execute("print(inherited['fork'], inherited['n'])");
@@ -468,7 +468,7 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 			const stateRoot = join(d, "state");
 
 			const parentSnap = resolveStateDir(stateRoot, parentFile).snapshotPath;
-			const m1 = engine({ cwd: d, snapshot: { path: parentSnap, debounceMs: 200 } });
+			const m1 = engine({ cwd: d, snapshot: { path: parentSnap } });
 			await m1.execute("forked_data = {'from': 'parent'}");
 			await m1.snapshotState();
 			await m1.kill();
@@ -480,7 +480,7 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 
 			// the lifecycle path, exactly as index.ts drives it
 			const lifecycle = new EngineLifecycle<EngineManager>({
-				create: () => new EngineManager({ cwd: d, snapshot: { path: forkSnap, debounceMs: 100 }, forkInherited: true }),
+				create: () => new EngineManager({ cwd: d, snapshot: { path: forkSnap }, forkInherited: true }),
 				dispose: async (e) => e.kill(),
 			});
 			const { engine: m2 } = await lifecycle.acquire("startup", "fork-conv");
@@ -511,7 +511,7 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 		{ timeout: 240_000 },
 		async () => {
 			const d = tempDir();
-			const snap = { path: join(d, "ns.snapshot"), debounceMs: 200 };
+			const snap = { path: join(d, "ns.snapshot") };
 			const m1 = engine({ cwd: d, snapshot: snap });
 			// __setstate__ sleeps forever, so unpickling this value during restore wedges the kernel
 			const r1 = await m1.execute(
@@ -578,7 +578,7 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 		{ timeout: 90_000 },
 		async () => {
 			const d = tempDir();
-			const snap = { path: join(d, "ns.snapshot"), debounceMs: 200 };
+			const snap = { path: join(d, "ns.snapshot") };
 			const m1 = engine({ cwd: d, snapshot: snap });
 			const r1 = await m1.execute(
 				"def greet(name):\n    return f'hi {name}'\nclass Box:\n    def __init__(self, v):\n        self.v = v\nitem = 41",
@@ -606,7 +606,7 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 			join(helpers, "web.py"),
 			'helper_description = """web(query) — stub."""\ndef web(query):\n    return query\n',
 		);
-		const snap = { path: join(d, "ns.snapshot"), debounceMs: 200 };
+		const snap = { path: join(d, "ns.snapshot") };
 		const m = engine({ cwd: d, env: { PI_HELPERS_DIR: helpers }, snapshot: snap });
 
 		await m.execute("data = {'count': 42}");
@@ -645,7 +645,7 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 
 	test("restore reports failed values without crashing the kernel", { timeout: 60_000 }, async () => {
 		const d = tempDir();
-		const snap = { path: join(d, "ns.snapshot"), debounceMs: 200 };
+		const snap = { path: join(d, "ns.snapshot") };
 		const m1 = engine({ cwd: d, snapshot: snap });
 		await m1.execute("good = {'ok': True}");
 		await new Promise((resolve) => setTimeout(resolve, 800));
@@ -695,6 +695,22 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 		expect(r.stdout.length).toBeLessThan(4300);
 	});
 
+	// --- the nested-budget case: a caller with its own output ceiling — a pi-fabric program bounding every
+	// --- nested result at ~50,000 chars — sets the session cap once instead of passing maxOutputChars per cell.
+	test("PI_REPL_MAX_OUTPUT_CHARS caps cells that named no cap of their own", { timeout: 60_000 }, async () => {
+		const d = tempDir();
+		const m = engine({ cwd: d, env: { PI_REPL_MAX_OUTPUT_CHARS: "6000" } });
+		const big = "print('\\n'.join('y' * 100 for _ in range(5000)))";
+
+		const r = await m.execute(big);
+		expect(r.status).toBe("ok");
+		expect(r.stdout).toContain("output truncated at 6000 chars");
+
+		// an explicit per-call cap still wins over whatever the session was configured with
+		const explicit = await m.execute(big, { maxOutputChars: 2000 });
+		expect(explicit.stdout).toContain("output truncated at 2000 chars");
+	});
+
 	test("listNamespaceNames lists user state and excludes helpers", { timeout: 60_000 }, async () => {
 		const d = tempDir();
 		const helpers = tempDir();
@@ -708,15 +724,29 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 		expect(names).not.toContain("double");
 	});
 
-	test("a cell that exceeds the silence window is reported as an error", { timeout: 60_000 }, async () => {
-		const d = tempDir();
-		const m = engine({ cwd: d, env: { PI_REPL_TIMEOUT_MS: "400" } });
+	// --- The watchdog interrupts; the cell is parked in one long blocking call, so the interrupt only bites
+	// --- when the sleep ends and Python regains a bytecode boundary. The kernel is left idle, so this is
+	// --- "aborted", not a Timeout: claiming the cell "may still be running" alarms about a kernel that is
+	// --- actually free, and hides the KeyboardInterrupt the cell really raised. ---
+	test(
+		"a silence-window cell that observes the interrupt is aborted with the kernel intact",
+		{ timeout: 60_000 },
+		async () => {
+			const d = tempDir();
+			const m = engine({ cwd: d, env: { PI_REPL_TIMEOUT_MS: "400" } });
 
-		const r = await m.execute("import time; time.sleep(1.5); print('late')");
-		expect(r.status).toBe("error");
-		expect(r.error?.name).toBe("Timeout");
-		expect(r.error?.message.toLowerCase()).toContain("did not finish");
-	});
+			const started = Date.now();
+			const r = await m.execute("import time; time.sleep(1.5); print('late')");
+			expect(r.status).toBe("aborted");
+			expect(r.stdout).not.toContain("late");
+			expect(Date.now() - started).toBeLessThan(8_000);
+
+			// interrupted, not killed: the same kernel is still serving
+			const r2 = await m.execute("print('still here')");
+			expect(r2.status).toBe("ok");
+			expect(r2.stdout).toContain("still here");
+		},
+	);
 
 	test("the silence watchdog allows a cell that keeps producing output", { timeout: 60_000 }, async () => {
 		const d = tempDir();
@@ -733,6 +763,10 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 		expect(r.stdout).toContain("done");
 	});
 
+	// --- This cell yields between sleeps on purpose. An interrupt takes effect at the next Python bytecode
+	// --- boundary, so a loop is cut within a fraction of a second and the kernel survives; a single long
+	// --- sleep cannot be cut at all (pinned by the next test). Written as time.sleep(60) this test waited
+	// --- out the whole abort grace and then failed the namespace check, because the kernel had been killed.
 	test("an aborted cell interrupts the kernel and keeps the namespace alive", { timeout: 90_000 }, async () => {
 		const d = tempDir();
 		const m = engine({ cwd: d });
@@ -741,7 +775,7 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 
 		const ac = new AbortController();
 		const start = Date.now();
-		const p = m.execute("import time; time.sleep(60)", { signal: ac.signal });
+		const p = m.execute("import time\nfor _ in range(600): time.sleep(0.1)", { signal: ac.signal });
 		await new Promise((resolve) => setTimeout(resolve, 1200));
 		ac.abort();
 		const r1 = await p;
@@ -755,9 +789,66 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 		expect(r2.stdout).toContain("True");
 	});
 
+	// --- Measured on Windows: an interrupt never enters a blocking call. A cell parked in one C call — a hung
+	// --- DraftSight RPC is the case this extension exists for — is uncutable, so the abort grace expires and the
+	// --- kernel is reaped. The result must say the handles died with it: bare "aborted" implies the namespace
+	// --- and every live object survived, and the model would then keep using a dead COM proxy.
+	test(
+		"a cell parked in a C call cannot be interrupted: the grace reaps it and says so",
+		{ timeout: 90_000 },
+		async () => {
+			const d = tempDir();
+			const m = engine({ cwd: d, env: { PI_REPL_ABORT_GRACE_MS: "1500" } });
+
+			// warm first: this test pins the C-call case, so the kernel has to be up before the abort lands;
+			// an abort that lands during a cold boot is pinned by the next test
+			await m.execute("x = 1");
+
+			const ac = new AbortController();
+			const started = Date.now();
+			const p = m.execute("import time; time.sleep(20)", { signal: ac.signal });
+			await new Promise((resolve) => setTimeout(resolve, 800));
+			ac.abort();
+			const r = await p;
+
+			expect(r.status).toBe("aborted");
+			expect(r.error?.name).toBe("KernelReaped");
+			// ~0.8s until abort + 1.5s grace, with generous slack: the point is it did not wait out the old 20s
+			expect(Date.now() - started).toBeLessThan(9_000);
+
+			// --- the reaping is not the end of the session: a wedged RPC plus one Ctrl-C used to leave the engine at
+			// --- "shutdown", and every later cell answered "Engine has been shut down". The next cell gets a fresh
+			// --- kernel instead.
+			const next = await m.execute("print(1 + 1)");
+			expect(next.status).toBe("ok");
+			expect(next.stdout.trim()).toBe("2");
+		},
+	);
+
+	test("an abort that lands during a cold boot is withdrawn, not swallowed", { timeout: 90_000 }, async () => {
+		const d = tempDir();
+		const m = engine({ cwd: d });
+		const ac = new AbortController();
+		const started = Date.now();
+		const p = m.execute("x = 1\nimport time\ntime.sleep(5)", { signal: ac.signal });
+		await new Promise((resolve) => setTimeout(resolve, 250));
+		ac.abort();
+		const r = await p;
+
+		expect(r.status).toBe("aborted");
+		// used to be: the abort landed while the kernel was booting, nothing was withdrawn, and the cell then
+		// ran its full 5 s and was merely reported as aborted afterwards
+		expect(Date.now() - started).toBeLessThan(3_000);
+
+		// --- and the cell really never ran: had it executed, x would be bound ---
+		const after = await m.execute("x");
+		expect(after.status).toBe("error");
+		expect(after.error?.name).toBe("NameError");
+	});
+
 	test("a dead kernel settles the next cell with a rebuild from the last snapshot", { timeout: 90_000 }, async () => {
 		const d = tempDir();
-		const snap = { path: join(d, "ns.snapshot"), debounceMs: 200 };
+		const snap = { path: join(d, "ns.snapshot") };
 		const m = engine({ cwd: d, snapshot: snap });
 
 		await m.execute("notes = {'keep': True}");

@@ -21,6 +21,8 @@ import {
 	pruneSnapshotDirs,
 } from "../src/engine/index.js";
 import { type CellResult, KernelClient } from "../src/engine/kernel.js";
+import { pythonCandidates } from "../src/engine/python-locate.js";
+import { formatDiagnostics, hostMode, toolsForHost } from "../src/extension/diagnostics.js";
 import { buildHelpersMap, buildHelpersMapForCwd, buildHelpersPromptSection } from "../src/extension/helpers.js";
 import { buildPromptGuidelines } from "../src/extension/prompt.js";
 import {
@@ -44,7 +46,6 @@ import {
 	formatResetToast,
 	type RevivableEngine,
 } from "../src/extension/session-engine.js";
-import { parseReplToggle, replArgumentCompletions, replToast, replUsageMessage, restoredTools } from "../src/extension/repl-command.js";
 import { withSkillsBlock } from "../src/extension/skill-hook.js";
 import {
 	forkParentSnapshot,
@@ -278,6 +279,25 @@ describe("helper boot announcements", () => {
 		expect(none).toBe("repl no helpers loaded · failed: scraper (boom)");
 	});
 
+	test("a helper's own venv outranks the managed venv, with the platform's bin layout", () => {
+		// the kernel has to run where the helper's third-party imports resolve, or a COM helper cannot import
+		// pywin32 no matter what the roster says. Paths must exist: pythonCandidates drops an absent absolute.
+		const root = mkdtempSync(join(tmpdir(), "pi-repl-locate-"));
+		const cwd = join(root, "proj");
+		const helper = join(root, "helpers", "draftsight");
+		for (const venv of [join(cwd, ".venv"), join(helper, ".venv")]) {
+			mkdirSync(join(venv, "Scripts"), { recursive: true });
+			writeFileSync(join(venv, "Scripts", "python.exe"), "");
+		}
+		const sources = pythonCandidates(cwd, {}, "win32", [helper]).map((c) => c.source);
+		expect(sources.indexOf("project-venv")).toBeGreaterThanOrEqual(0);
+		expect(sources.indexOf("helper-dir")).toBeGreaterThan(sources.indexOf("project-venv"));
+		expect(sources.indexOf("helper-dir")).toBeLessThan(sources.lastIndexOf("path"));
+		expect(pythonCandidates(cwd, {}, "win32", [helper])[1].argv[0]).toBe(
+			join(helper, ".venv", "Scripts", "python.exe"),
+		);
+	});
+
 	test("static guidelines carry no roster and no helper marker; the per-session block carries both", () => {
 		const bullets = buildPromptGuidelines();
 		expect(bullets.some((b) => b.includes("<repl_engine_reset>"))).toBe(true);
@@ -285,7 +305,6 @@ describe("helper boot announcements", () => {
 		expect(bullets.some((b) => b.includes("<repl_helpers_failed>"))).toBe(false); // ...and so does its marker note
 
 		const proj = mkdtempSync(join(tmpdir(), "pi-repl-sec-"));
-		const global = mkdtempSync(join(tmpdir(), "pi-repl-sec-global-"));
 		mkdirSync(join(proj, ".pi", "helpers"), { recursive: true });
 		writeFileSync(join(proj, ".pi", "helpers", "web.py"), 'helper_description = """web() the block."""\n');
 		const block = buildHelpersPromptSection(proj);
@@ -638,7 +657,7 @@ describe("render-core: layout", () => {
 
 	test("settled stdout reuses the streaming wrap when the text is identical", () => {
 		const deps = testDeps();
-		const body = "x".repeat(60) + "\n" + "y".repeat(60);
+		const body = `${"x".repeat(60)}\n${"y".repeat(60)}`;
 		const state = makeState({
 			code: "",
 			expanded: true,
@@ -695,46 +714,110 @@ describe("per-line output cap", () => {
 	});
 });
 
-describe("/repl toggle", () => {
-	test("parses on/off, case-insensitive, whitespace-tolerant", () => {
-		expect(parseReplToggle("on")).toBe("on");
-		expect(parseReplToggle(" OFF ")).toBe("off");
-		expect(parseReplToggle("")).toBeUndefined();
-		expect(parseReplToggle("maybe")).toBeUndefined();
-		// a bare toggle is not a subcommand: the usage case
-		expect(parseReplToggle("true")).toBeUndefined();
+describe("host detection and /repl diagnostics", () => {
+	test("plain pi takes over; a pi-fabric host makes this extension a sidecar", () => {
+		expect(hostMode(["read", "bash", "edit", "write"])).toBe("takeover");
+		expect(hostMode(["fabric_exec", "read"])).toBe("sidecar");
+		// an unrelated extension whose name merely contains the word must not flip the host
+		expect(hostMode(["fabric_helper", "read"])).toBe("takeover");
 	});
 
-	test("completes on/off by prefix; null falls through to default completion", () => {
-		expect(replArgumentCompletions("")!.map((c) => c.value)).toEqual(["on", "off"]);
-		expect(replArgumentCompletions("o")!.map((c) => c.value)).toEqual(["on", "off"]);
-		expect(replArgumentCompletions("of")!.map((c) => c.value)).toEqual(["off"]);
-		expect(replArgumentCompletions("x")).toBeNull();
+	test("the tool surface: takeover collapses, a fabric host keeps fabric_exec and drops execute", () => {
+		expect(toolsForHost(["read", "bash", "execute"], "takeover")).toEqual(["execute"]);
+		// what the old restoredTools()/FALLBACK_TOOLS path got wrong: a hardcoded restore could re-add
+		// read/bash/edit/write and silently drop fabric_exec, breaking the host we are sharing pi with
+		expect(toolsForHost(["fabric_exec", "read", "bash", "execute"], "sidecar")).toEqual([
+			"fabric_exec",
+			"read",
+			"bash",
+		]);
+		// never invent tools that were not active, and never restore an empty surface
+		expect(toolsForHost([], "sidecar")).toEqual([]);
+		expect(toolsForHost(["execute"], "sidecar")).toEqual([]);
 	});
 
-	test("usage message nudges toward the subcommand that would change something", () => {
-		expect(replUsageMessage(true)).toContain("/repl off");
-		expect(replUsageMessage(true)).toContain("currently on");
-		expect(replUsageMessage(false)).toContain("/repl on");
-		expect(replUsageMessage(false)).toContain("currently off");
+	test("diagnostics reports no kernel without booting one", () => {
+		const text = formatDiagnostics({ host: "sidecar", enginePresent: false, helperNames: [], helperDirs: [] });
+		expect(text).toContain("sidecar");
+		expect(text).toContain("not started");
+		expect(text.split("\n")).toHaveLength(2);
 	});
 
-	test("toasts announce the mode and the transition", () => {
-		expect(replToast("on")).toContain("repl on");
-		expect(replToast("on")).toContain("execute");
-		expect(replToast("off")).toContain("repl off");
-		expect(replToast("off")).toContain("stays warm");
+	test("diagnostics prints the process roles, the interpreter rule, helpers and their dirs, and the snapshot", () => {
+		const text = formatDiagnostics({
+			host: "takeover",
+			enginePresent: true,
+			kernelState: "running",
+			pid: 6692,
+			bridgePid: 21824,
+			kernelPid: 25304,
+			interpreter: "C:/py/Scripts/python.exe",
+			interpreterSource: "helper-dir",
+			helperNames: ["draftsight"],
+			helperDirs: ["D:/proj/.pi/helpers"],
+			snapshotPath: "/state/conv.snapshot",
+			snapshotPresent: true,
+		});
+		expect(text).toContain("running launcher 6692 · bridge 21824 · ipykernel 25304");
+		// the leaf interpreter that holds the COM proxies is a child of 25304, invisible to the host: the only
+		// hand-kill that clears the whole chain is the tree kill from the root we did get a handle on
+		expect(text).toContain("taskkill /PID 6692 /T /F");
+		// POSIX: the spawned process IS the bridge, so no "launcher" role is invented
+		expect(
+			formatDiagnostics({
+				host: "takeover",
+				enginePresent: true,
+				kernelState: "running",
+				pid: 7,
+				bridgePid: 7,
+				kernelPid: 9,
+				helperNames: [],
+				helperDirs: [],
+			}),
+		).toContain("running bridge 7 · ipykernel 9");
+		// POSIX has no launcher stub, so it must not be told to reach for taskkill
+		expect(
+			formatDiagnostics({
+				host: "takeover",
+				enginePresent: true,
+				kernelState: "running",
+				pid: 7,
+				bridgePid: 7,
+				kernelPid: 9,
+				helperNames: [],
+				helperDirs: [],
+			}),
+		).not.toContain("taskkill");
+		expect(text).toContain("C:/py/Scripts/python.exe (helper-dir)");
+		expect(text).toContain("helpers: draftsight");
+		expect(text).toContain("helper dirs: D:/proj/.pi/helpers");
+		expect(text).toContain("namespace on disk");
 	});
 
-	test("restoring prefers the captured stock loadout; falls back to the built-ins", () => {
-		expect(restoredTools(["read", "bash", "my_tool"])).toEqual(["read", "bash", "my_tool"]);
-		expect(restoredTools(undefined)).toEqual(["read", "bash", "edit", "write"]);
-		// an empty capture must never restore zero tools — setActiveTools([]) bricks the session
-		expect(restoredTools([])).toEqual(["read", "bash", "edit", "write"]);
+	test("an ephemeral session says snapshots are disabled instead of implying one exists", () => {
+		const text = formatDiagnostics({
+			host: "takeover",
+			enginePresent: true,
+			kernelState: "idle",
+			helperNames: [],
+			helperDirs: [],
+		});
+		expect(text).toContain("snapshot: disabled (ephemeral session)");
+		// a real state dir with nothing flushed yet is a different fact, and must not read as "disabled"
+		const fresh = formatDiagnostics({
+			host: "takeover",
+			enginePresent: true,
+			kernelState: "idle",
+			helperNames: [],
+			helperDirs: [],
+			snapshotPath: "/state/conv.snapshot",
+			snapshotPresent: false,
+		});
+		expect(fresh).toContain("/state/conv.snapshot · nothing written yet");
 	});
 });
 
-describe("skills advertisement in --repl (withSkillsBlock)", () => {
+describe("skills advertisement on a takeover host (withSkillsBlock)", () => {
 	const skill = {
 		name: "session-memory",
 		description: "Recall past pi conversations from session history.",
@@ -764,7 +847,7 @@ describe("skills advertisement in --repl (withSkillsBlock)", () => {
 	});
 
 	test("stays undefined when the block is already present (read-capable pi)", () => {
-		const already = promptWithCwd + "\n<available_skills>\n</available_skills>";
+		const already = `${promptWithCwd}\n<available_skills>\n</available_skills>`;
 		expect(withSkillsBlock(already, [skill])).toBeUndefined();
 	});
 
@@ -1377,6 +1460,13 @@ describe("bridge pipe routing", () => {
 		send(msg: unknown): void;
 		handleLine(line: string): void;
 		executeCellNow(code: string, opts: object): Promise<CellResult>;
+		// request ops are routed by op id too, and the router is what these tests exercise
+		snapshot(
+			path: string,
+			maxBytes: number,
+		): Promise<{ complete?: boolean; saved?: string[]; failed?: string[]; bytes?: number }>;
+		listNames(): Promise<unknown>;
+		restore(path: string): Promise<unknown>;
 	};
 
 	function routedKernel() {
@@ -1477,5 +1567,23 @@ describe("bridge pipe routing", () => {
 		feed(`{"type":"reply","id":"${req.id}","error":"snapshot unreadable"}`);
 		await expect(rest).rejects.toThrow("snapshot unreadable");
 		expect(() => feed("this is not json")).not.toThrow();
+	});
+});
+
+describe("output budget", () => {
+	// A model browsing a REPL wants a cell's whole output. A caller that is itself bounded — a pi-fabric program
+	// with one ~50,000-char budget shared across every nested result — does not want one cell to spend it, so the
+	// session default has to be overridable from the environment as well as per call.
+	test("PI_REPL_MAX_OUTPUT_CHARS sets the per-cell cap", () => {
+		expect(new EngineManager({ env: { PI_REPL_MAX_OUTPUT_CHARS: "12000" } }).outputCharBudget).toBe(12000);
+		expect(new EngineManager({}).outputCharBudget).toBe(DEFAULT_MAX_OUTPUT_CHARS);
+	});
+
+	test("junk and absurdly small caps fall back instead of producing unreadable output", () => {
+		for (const junk of ["nope", "0", "-5", "10", "1.5"]) {
+			expect(new EngineManager({ env: { PI_REPL_MAX_OUTPUT_CHARS: junk } }).outputCharBudget).toBe(
+				DEFAULT_MAX_OUTPUT_CHARS,
+			);
+		}
 	});
 });

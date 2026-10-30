@@ -49,7 +49,7 @@ def main():
     expected = sys.argv[1:]
     sock_path = os.environ.get("PI_BRIDGE_SOCK")
     if not sock_path:
-        raise SystemExit("FAIL: PI_BRIDGE_SOCK is not set; start pi with --repl")
+        raise SystemExit("FAIL: PI_BRIDGE_SOCK is not set; start pi with the pi-bridge extension loaded")
 
     s = connect(sock_path)
     pong = xchg(s, {"v": 1, "op": "ping"})

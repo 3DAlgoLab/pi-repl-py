@@ -57,6 +57,12 @@ export function buildHelpersMapForCwd(cwd: string, globalDir?: string, helpersDi
 	return loadHelperEntries(dirs).map(formatHelperLine);
 }
 
+/** Just the names, for read-only surfaces (/repl diagnostics) that must not render the prompt's description block. */
+export function listHelperNamesForCwd(cwd: string, globalDir?: string, helpersDir?: string): string[] {
+	const dirs = helpersDir ? [helpersDir] : resolveHelperDirs(cwd, globalDir);
+	return loadHelperEntries(dirs).map((entry) => entry.name);
+}
+
 /** System-prompt block for this session's helpers; undefined when there are none. */
 export function buildHelpersPromptSection(cwd: string): string | undefined {
 	const map = buildHelpersMapForCwd(cwd, process.env.PI_HELPERS_GLOBAL_DIR, process.env.PI_HELPERS_DIR);

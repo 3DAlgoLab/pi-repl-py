@@ -17,6 +17,7 @@ lint:
 # (unlike biome, tsc resolves imports, so a missing one can never ship again)
 types:
 	bunx tsc --noEmit
+	bunx tsc -p tsconfig.test.json --noEmit
 
 # ── security ──────────────────────────────────────────────────────────────
 security:

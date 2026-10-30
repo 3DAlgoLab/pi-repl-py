@@ -1,7 +1,7 @@
 ---
 name: bridge-helper
 description: "Write a bridge.py that exposes exactly the pi-bridge tools a project needs, then prove it against the live socket before handing it over. Use when the user wants pi tools inside repl cells for a specific project, or says: write a bridge helper, bridge for this project, helper for the bridge, I want pi.read in my cells, give my notebook pi tools."
-compatibility: "Requires a running pi-bridge socket (pi --repl with the pi-bridge extension) and python3."
+compatibility: "Requires a running pi-bridge socket (a `pi` session with the pi-bridge extension loaded) and python3."
 ---
 
 # Bridge Helper
@@ -16,7 +16,7 @@ before writing any socket code.
 1. **Read the live catalog.** Run `python3 <this skill's dir>/scripts/catalog.py`
    (resolve it the same way this SKILL.md was loaded). It prints every mounted
    tool with its real signature. No socket?
-   Then the bridge is not running: tell the user to start `pi --repl` with the
+   Then the bridge is not running: tell the user to start `pi` with the
    pi-bridge extension and stop. Offer to write the helper untested if they
    confirm; do not write one silently.
 2. **Fix the tool set.** From the user's request, list the tools the helper

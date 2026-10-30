@@ -33,7 +33,7 @@ python3 -m venv --clear ~/.pi/agent/pi-repl/venv
 ~/.pi/agent/pi-repl/venv/bin/pip install ipykernel
 
 # 4. finish the package install
-pi install npm:pi-repl-py
+pi install github:3DAlgoLab/pi-repl-py
 
 # 5. verify
 ~/.pi/agent/pi-repl/venv/bin/python3 -c "import psutil, ipykernel; print(psutil.__version__, ipykernel.__version__)"
@@ -42,7 +42,7 @@ pi install npm:pi-repl-py
 The final command checks that both packages import successfully. Then start pi-repl:
 
 ```bash
-pi --repl
+pi
 ```
 
 The venv already contains the working `ipykernel` that the evaluator needs.

@@ -1,116 +1,83 @@
 # pi-repl-py
 
-A [pi](https://pi.dev) extension that gives the agent a single `execute` tool backed by a
-**persistent Python evaluator**: a real `ipython` kernel that keeps variables, functions, imports,
-and data alive across every call and turn.
-
-There is no interactive shell. The agent sends batches of Python code to a workspace that stays
-alive for the session. Only the output comes back to the conversation. This keeps state in Python
-without requiring an interactive prompt.
+A [pi](https://pi.dev) extension that gives the agent one `execute` tool backed by a **persistent Python kernel**. Variables, imports, dataframes, open files and live object handles stay alive for the whole session. Only output comes back to the conversation.
 
 ```
-✓ repl · data = load_json("records.json")       · done
+✓ repl · data = load_json("records.json")
 ✓ repl · avg = sum(v["score"] for v in data)/len(data)
 ✓ repl · print("mean score:", round(avg, 2))    · mean score: 41.7
 ```
 
-`data` is still there in cell three. Nothing was re-read, nothing re-derived from output, because
-the kernel stayed alive.
+`data` is still there in cell three. Nothing was re-read and nothing re-derived from earlier output.
 
-## Quick start
+## Why
 
-```bash
-# from a clone, one-time setup
-just setup            # npm install + a project-local .venv with ipykernel
+pi's code-mode is stateless per call: every invocation starts a fresh interpreter. For throwaway computation that is free. It stops being free the moment the work has state that is expensive or impossible to rebuild — a loaded dataset, a database transaction, a live COM connection.
 
-# run a session
-pi --repl
-```
+Driving DraftSight over `win32com` is the founding case. Re-acquiring that connection per call costs an interpreter start, `import win32com.client`, typelib dispatch warm-up and a fresh COM apartment — roughly 0.3–1.5 s, paid once per tool call, so a drawing built over 50 turns pays it 50 times. Worse, a stateless kernel can never hold a pywin32 event sink or hand a wrapper object back in without re-resolving it. One kernel that stays up removes that tax entirely.
 
-A plain `pi` session is untouched; the extension is dormant until `--repl` is passed (or
-`PI_REPL_FORCE=1`).
+It is **not** an interactive shell: the agent sends batches of Python to a kernel that stays alive for the session.
 
-You can also switch mid-session. `/repl on` activates the REPL; `/repl off` puts your normal
-tools back (the kernel keeps running, so your Python namespace is still there when you
-switch back). The flag only decides where a session starts; the command handles the rest.
-
-## Installing as a pi package
-
-Install the package from npm or directly from GitHub:
+## Install
 
 ```bash
-pi install npm:pi-repl-py
-# or
-pi install github:k3-2o/pi-repl-py
+pi install github:3DAlgoLab/pi-repl-py
 ```
 
-The install runs a `postinstall` that creates the Python venv the evaluator needs, at a stable
-per-user path (`~/.pi/agent/pi-repl/venv`). If `python3` or the network is missing, it prints a
-clear notice. How the interpreter is resolved is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The postinstall builds the Python venv the kernel needs at `~/.pi/agent/pi-repl/venv`. If `python3` or the network is missing it says so plainly instead of half-building. On a clone, run `just setup` (`just setup --project` builds a project-local `.venv` instead). Termux needs `psutil` built from source: [docs/termux.md](docs/termux.md).
 
-### Termux / Android
+## Use
 
-On **Termux (Android)**, the `postinstall` venv build can fail because `ipykernel` depends on
-`psutil`, and PyPI does not provide a compatible Android wheel. The [Termux / Android setup guide](docs/termux.md) shows how to build `psutil` from source and finish the installation.
+Start `pi` and send Python. There is no flag and nothing to switch on.
 
-## What you get
+- **Plain pi** — active tools collapse to `execute` alone, one code-mode per prompt. Nothing is missing inside a cell: shell and files are plain Python there (`subprocess.run`, `pathlib`, and ipython's `!cmd` and `%%bash`). There are no `bash(...)`/`read(...)` wrapper callables — that toolbox was removed in favour of helpers.
+- **With pi-fabric** — `fabric_exec` stays active and `execute` leaves the model's tool set; a program reaches the same persistent kernel as `extensions["pi-repl-py"].execute(...)`. Fabric's own programs are stateless per call, so this is the durable-state sidecar they reach for. The host is detected from the active tool list at session start, and the prompt carries exactly one code-mode either way.
 
-- **A persistent namespace.** Variables, functions, imports, and data survive across cells and
-  turns; snapshots preserve them across a best-effort restart.
-- **A real `ipython` kernel**, not a hand-rolled `exec` loop.
-- **Shell and file IO as plain Python.** Use `!cmd` or `%%bash` for shell commands. Use
-  `subprocess.run(...)` when you need the result in a variable, and use `open()` or `pathlib`
-  for files. There is no extra wrapper API to learn.
-- **Error survival.** A cell that throws reports the traceback and the kernel keeps going.
-- **Explicit recovery.** If it restarts, pi-repl reports which state it restored and which state it lost.
+A cell that raises reports the traceback and the kernel keeps going. `/repl` prints diagnostics: process roles and pids, the interpreter chosen, the helpers loaded and where they came from, the snapshot location. It changes nothing.
 
-## Helpers
+## Layout
 
-A **helper** is a `.py` file that gets exec'd into every kernel, so whatever it defines
-(like functions, classes, constants, imports, or a module that manages a tricky piece of
-complexity) is available in the workspace. Drop a file in a `.pi/helpers/` directory in
-your project (or `~/.pi/agent/pi-repl/helpers/` for every project) and restart the session;
-e.g. `helpers/double.py` defining `def double(x)` becomes callable as `double(...)`. Global
-helpers ship **empty** (shell and file IO are already plain Python), so a fresh install
-preloads nothing until you add one. Project helpers shadow same-named global ones. Each
-helper's `helper_description` is shown to the model verbatim; the full contract lives in
-[docs/helpers.md](docs/helpers.md).
-
-The extension keeps its runtime under one folder in your home directory:
+One folder, no config file:
 
 ```
 ~/.pi/agent/pi-repl/
-  venv/         the Python interpreter + ipykernel
-  helpers/      global helpers (created empty on install; every *.py loads)
-  state/        per-session namespace snapshots
+  venv/       the interpreter + ipykernel
+  helpers/    global helpers, every *.py is preloaded
+  state/      per-session namespace snapshots
 ```
 
-Project helpers live in `<project>/.pi/helpers/` instead; both tiers are scanned with the
-project one first. No config file.
+A **helper** is a `.py` file exec'd into every kernel, so its functions, classes and constants are simply available in the cell. Put one in `<project>/.pi/helpers/` (project wins) or the global directory above; `/reload` or a new session picks it up. Each helper's `helper_description` is shown to the model verbatim, and the contract is in [docs/helpers.md](docs/helpers.md). Global helpers ship empty — shell and file IO are already plain Python (`!cmd`, `%%bash`, `subprocess.run`, `pathlib`).
 
-Changing a helper (adding/removing a file, renaming one with a `_` prefix) needs a
-**session restart / `/reload`**: the prompt list is built when `execute` is registered and
-the kernel execs helpers only at boot.
+## Interrupts, measured
 
-## Configuration
+Aborting a cell (Ctrl-C, or the harness cancelling the call) sends an interrupt, which takes effect at the next Python bytecode boundary and cannot enter a blocking call. Measured on Windows, Python 3.14: a loop of `time.sleep(0.05)` dies ~0.2 s after the signal; one `time.sleep(3)` finishes its 3 s first. A cell parked inside a single C call — a hung COM/RPC, a socket read — never regains a boundary, so after `PI_REPL_ABORT_GRACE_MS` (default 5000) the kernel is killed and the result says `KernelReaped`: every live handle it held died with it, and recovery comes from the last snapshot, not from memory. The engine survives its kernel — the next cell boots a fresh one. The rule that follows: write cells as many short calls. Forty COM calls are interruptible between each; one `Rebuild()` is not interruptible at all.
 
-There is deliberately no configuration file. Everything is arranged under
-`~/.pi/agent/pi-repl/`: the venv, the fixed helpers dir, and the session state.
-The Python interpreter is auto-resolved (the venv, else `$PYTHON`/`python3`).
+## Interpreter and knobs
 
-## More
+Resolution lives in `src/engine/python-locate.ts`; a candidate that cannot import `ipykernel` and `cloudpickle` is skipped rather than booted, so a bare repo `.venv` can never shadow a working one. The winner is exported to the kernel as `PI_PYTHON`, so a helper or sibling skill installs into the interpreter that is actually running instead of guessing: `$PI_REPL_PYTHON` → `$PI_PYTHON` → project `.venv` (when `PI_PROJECT_VENV=1`, or if it already has the deps) → the managed venv → any `python` / `python3` / `py -3` on PATH that can import them.
 
-- Why this design: [docs/design.md](docs/design.md)
-- How it works, the venv, and the kernel: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- How to write and load helpers: [docs/helpers.md](docs/helpers.md)
-- Working examples you can copy: [example/](example/) — helpers under `example/helper/` and skills under `example/skills/`
-- Termux / Android installation: [docs/termux.md](docs/termux.md)
+| Variable | Effect |
+| --- | --- |
+| `PI_PYTHON`, `PI_REPL_PYTHON` | pin the interpreter, trusted without probing |
+| `PI_PROJECT_VENV=1` | the project's `.venv` wins; its `pyvenv.cfg` authorises that project's `PYTHONPATH`, nothing else |
+| `PI_HELPERS_GLOBAL_DIR` | change the global helpers directory (default `~/.pi/agent/pi-repl/helpers`) |
+| `PI_HELPERS_DIR` | use exactly one helpers directory and skip the normal project-then-global walk |
+| `PI_REPL_TIMEOUT_MS` | per-cell wall clock, 0 (off) by default |
+| `PI_REPL_ABORT_GRACE_MS` | how long an aborted cell gets before the kernel is reaped (5000) |
+| `PI_REPL_MAX_OUTPUT_CHARS` | per-cell output cap, 46,080 by default; 4,096 per line, cuts marked. A caller with its own budget — a Fabric program bounding nested results near 50,000 — wants this lower; one call can override it with `maxOutputChars` |
 
 ## It is not
 
-- A sandbox. The kernel runs with your permissions; the toolbox trusts you.
-- A subagent framework. There is no `repl.run` API; spawn a process with `subprocess.run`.
-- A pi tool-rack. It is one `execute` tool with functions inside.
+- A sandbox: the kernel runs with your permissions.
+- A subagent framework: no `repl.run` API, use `subprocess.run`.
+- A tool rack: one `execute` tool, functions inside it.
+
+## More
+
+- [docs/design.md](docs/design.md) — why this design
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — venv, kernel, process tree, host detection
+- [docs/helpers.md](docs/helpers.md) — writing helpers
+- [example/](example/) — helpers and skills to copy
 
 ## License
 

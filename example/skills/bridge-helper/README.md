@@ -24,7 +24,7 @@ Given a request like "read and bash in this notebook", it:
 
 ## Requirements
 
-- pi-bridge running: start pi with `pi --repl` and the
+- pi-bridge running: start `pi` with the
   [pi-bridge extension](https://github.com/k3-2o/pi-bridge) installed
 - `python3`
 

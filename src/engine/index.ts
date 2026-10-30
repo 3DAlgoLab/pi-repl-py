@@ -1,27 +1,52 @@
 // --- EngineManager: venv resolution, spawn, queue, snapshots, abort grace, teardown; the wire lives in kernel.ts ---
 
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { resolveHelperDirs } from "./helpers-locate.js";
 import { type HelperLoadResult, KernelClient } from "./kernel.js";
+import { formatPythonFailure, type PythonResolution, type PythonSource, resolvePython } from "./python-locate.js";
 
 export type { HelperLoadResult } from "./kernel.js";
+export { formatPythonFailure, managedVenvDir, pythonCandidates, resolvePython } from "./python-locate.js";
 
-function installVenvPython(): string {
-	return join(homedir(), ".pi", "agent", "pi-repl", "venv", "bin", "python3");
-}
+/** A wedged guest never answers the shutdown snapshot; this is what keeps session_shutdown from hanging. */
+const SHUTDOWN_SNAPSHOT_DEADLINE_MS = Number(process.env.PI_REPL_SNAPSHOT_DEADLINE_MS ?? 15_000) || 15_000;
 
-function resolvePythonPath(_cwd: string | undefined): string {
-	// --- only the install venv: a repo `.venv` may lack ipykernel and would shadow the good one ---
-	const installVenv = installVenvPython();
-	if (existsSync(installVenv)) return installVenv;
-	return process.env.PYTHON ?? "python3";
+/** Stop waiting after the deadline; the underlying op is still settled by the kill that follows. */
+function withDeadline<T>(promise: Promise<T | null>, ms: number): Promise<T | null> {
+	return new Promise<T | null>((resolve) => {
+		const timer = setTimeout(() => resolve(null), ms);
+		timer.unref?.();
+		promise.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value ?? null);
+			},
+			() => {
+				clearTimeout(timer);
+				resolve(null);
+			},
+		);
+	});
 }
 
 export const DEFAULT_MAX_OUTPUT_CHARS = 46080;
+/** A configured cap this small produces output nobody can read; such a value is ignored, not honoured. */
+const MIN_USEFUL_OUTPUT_CHARS = 512;
 /** Per-line cap: one giant line must not own the channel budget while long JSON/reprs/errors still pass whole. */
 export const MAX_OUTPUT_LINE_CHARS = 4096;
-const ABORT_GRACE_MS = 20_000;
+/**
+ * How long an aborted cell gets to observe the interrupt before the kernel is killed.
+ *
+ * Measured on Windows: an interrupt takes effect at the cell's next Python bytecode boundary, never inside a
+ * blocking call — a loop of 0.05 s sleeps is cut ~0.2 s after the signal, while a single time.sleep(3) runs the
+ * whole 3 s and only then raises KeyboardInterrupt. A cell parked in one long C call (a hung DraftSight RPC, a
+ * socket read, a native compute) never observes it at all, and only the kill reaches it.
+ *
+ * So the grace costs nothing when it works (milliseconds) and buys nothing when it does not. The old 20 s was a
+ * guess; 5 s reaps a wedged kernel promptly while still letting a yielding cell unwind its finally blocks.
+ */
+const DEFAULT_ABORT_GRACE_MS = 5_000;
 /** Shared deadline: bounds a wedged boot (lifecycle) and a wedged background restore alike. */
 export const DEFAULT_BOOT_TIMEOUT_MS = 90_000;
 /** Snapshot size cap, also per-entry; oversized bindings are reported as skipped names. */
@@ -176,7 +201,7 @@ export class EngineManager {
 	private state: "idle" | "starting" | "running" | "shutdown" = "idle";
 	private startPromise?: Promise<void>;
 	private executionQueue: Promise<unknown> = Promise.resolve();
-	private pythonPath?: string;
+	private python?: PythonResolution;
 	private restoredKernel?: KernelClient;
 	/** A wedged revive marks the engine: later kernels boot without restoring. */
 	private restoreSkipped: boolean;
@@ -187,9 +212,32 @@ export class EngineManager {
 	/** Whether the current boot's report has been handed out (once per boot). */
 	private helperReportTaken = true;
 	private readonly forkInherited: boolean;
+	/** Per-engine, because the right grace depends on what the cell is doing (see DEFAULT_ABORT_GRACE_MS). */
+	private readonly abortGraceMs: number;
+	/**
+	 * Output cap applied when a caller does not name one. Env-overridable because the right number depends on who
+	 * is reading: a model browsing a REPL wants everything, while a caller with its own shared output budget
+	 * (a pi-fabric program bounding nested results at ~50,000 chars) wants one cell not to spend it all.
+	 */
+	private readonly maxOutputCharsDefault: number;
+	/**
+	 * Set when an abort's grace expired and the kernel had to be killed. The next cell then boots a fresh kernel
+	 * and revives the snapshot ahead of it; without the flag the engine would sit at `shutdown` and every later
+	 * cell would throw, ending the session's Python over one wedged RPC.
+	 */
+	private reapRecovery = false;
 
 	constructor(options: EngineOptions = {}) {
 		this.options = options;
+		this.abortGraceMs = Math.max(
+			0,
+			Number(process.env.PI_REPL_ABORT_GRACE_MS ?? options.env?.PI_REPL_ABORT_GRACE_MS ?? DEFAULT_ABORT_GRACE_MS),
+		);
+		const configuredCap = Number(process.env.PI_REPL_MAX_OUTPUT_CHARS ?? options.env?.PI_REPL_MAX_OUTPUT_CHARS);
+		this.maxOutputCharsDefault =
+			Number.isInteger(configuredCap) && configuredCap >= MIN_USEFUL_OUTPUT_CHARS
+				? configuredCap
+				: DEFAULT_MAX_OUTPUT_CHARS;
 		this.forkInherited = options.forkInherited ?? false;
 		this.restoreSkipped = options.skipRestore ?? false;
 		// no snapshot capability: recovery is trivially "nothing to revive"
@@ -200,9 +248,49 @@ export class EngineManager {
 		return this.state === "running" && (this.kernel?.isRunning ?? false);
 	}
 
+	/** The cap a cell gets when the caller named none; public so the rule can be tested without a kernel. */
+	get outputCharBudget(): number {
+		return this.maxOutputCharsDefault;
+	}
+
+	/** Spawned pid (the venv launcher on Windows). See KernelClient for the three-role explanation. */
+	get pid(): number | undefined {
+		return this.kernel?.pid;
+	}
+
+	/** The bridge process (op stream + ZMQ channels). */
+	get bridgePid(): number | undefined {
+		return this.kernel?.bridgePid;
+	}
+
+	/** The ipykernel subprocess pid — the one a leaked COM handle belongs to. */
+	get kernelPid(): number | undefined {
+		return this.kernel?.kernelPid;
+	}
+
+	/** Boot state as a value (a field read is not narrowed away by control flow). */
+	get bootState(): "idle" | "starting" | "running" | "shutdown" {
+		return this.state;
+	}
+
+	/** Where this conversation's namespace lives on disk; undefined for an ephemeral session. */
+	get snapshotPath(): string | undefined {
+		return this.options.snapshot?.path;
+	}
+
 	/** True when this engine is a fork that inherited its parent's namespace (drives the fork toast). */
 	get inheritedFromFork(): boolean {
 		return this.forkInherited;
+	}
+
+	/** Interpreter the kernel runs on, as resolved at boot; undefined before the first boot. */
+	get pythonInterpreter(): string | undefined {
+		return this.python?.executable ?? this.python?.argv[0];
+	}
+
+	/** Which rule selected that interpreter (pin, project venv, managed venv, PATH). */
+	get pythonSource(): PythonSource | undefined {
+		return this.python?.source;
 	}
 
 	/** Current boot's helper verdicts, handed out once per boot (first cell of a session/rebuild); null when nothing to announce. */
@@ -233,15 +321,24 @@ export class EngineManager {
 
 	private async doStart(): Promise<void> {
 		this.state = "starting";
+		// --- one interpreter answer for the whole machine (see python-locate.ts): a pin wins outright,
+		// --- everything else has to prove it can import the bridge's deps before it is trusted ---
+		const resolved = resolvePython(this.options.cwd, { helperDirs: resolveHelperDirs(this.options.cwd) });
+		this.python = resolved;
+		if (!resolved.ok) {
+			this.state = "idle";
+			throw new Error(formatPythonFailure(resolved));
+		}
 		installProcessCleanupOnce();
 		liveEngines.add(this);
-		this.pythonPath = resolvePythonPath(this.options.cwd);
 		const timeoutMs = Number(process.env.PI_REPL_TIMEOUT_MS ?? this.options.env?.PI_REPL_TIMEOUT_MS ?? 0) || 0;
 		try {
 			const snap = this.options.snapshot;
-			this.kernel = await KernelClient.start(this.pythonPath, {
+			this.kernel = await KernelClient.start(resolved.argv, {
 				cwd: this.options.cwd,
-				env: this.options.env,
+				// --- PI_PYTHON is the contract with sibling skills: draftsight-com installs its package
+				// --- into $PI_PYTHON, so the package lands in the interpreter that actually runs cells ---
+				env: { ...this.options.env, ...(resolved.executable ? { PI_PYTHON: resolved.executable } : {}) },
 				timeoutMs,
 				snapshot: snap
 					? {
@@ -292,7 +389,15 @@ export class EngineManager {
 
 	async dispose(): Promise<void> {
 		if (this.state === "running") {
-			await this.snapshotState().catch(() => null);
+			// --- interrupt first: the bridge serialises ops, so a snapshot queues behind the running cell
+			// --- and the deadline below would be spent waiting out a cell that is about to be killed anyway ---
+			if (this.kernel?.hasActiveCell) this.kernel.requestInterrupt();
+			// --- bounded: an unanswered snapshot op would keep session_shutdown from returning, and the
+			// --- process group would stay alive holding every handle the kernel had open ---
+			await withDeadline(
+				this.snapshotState().catch(() => null),
+				SHUTDOWN_SNAPSHOT_DEADLINE_MS,
+			);
 		}
 		await this.kernel?.shutdown();
 		this.killSync();
@@ -314,7 +419,50 @@ export class EngineManager {
 			if (this.isShutdown()) {
 				throw new Error("Engine has been shut down");
 			}
+			// --- the abort can land while a cold engine is still booting, and it used to be lost: the listener was
+			// --- attached only once the cell had been submitted, so an abort during boot changed nothing and the cell
+			// --- then ran to completion (measured: a sleep(20) withdrawn at +0.8 s ran the full 20 s). ---
+			const started = Date.now();
+			let withdrawn = false;
+			let aborted = false;
+			let graceTimer: ReturnType<typeof setTimeout> | undefined;
+			// --- the grace expiring means the cell never reached a Python boundary: the kernel was reaped, and every
+			// --- live handle it held (COM proxy, open file, connection) died with it. The model has to be told,
+			// --- because "aborted" alone implies the namespace is intact. ---
+			let reapedDuringAbort = false;
+			const onAbort = () => {
+				withdrawn = true;
+				aborted = true;
+				this.kernel?.requestInterrupt();
+				// --- interrupt is a real KeyboardInterrupt, but a C-wedged cell ignores it; then kill and rebuild ---
+				graceTimer = setTimeout(() => {
+					if (this.state === "running" && this.kernel) {
+						reapedDuringAbort = true;
+						// --- the engine survives its kernel: idle, not shutdown, so the next cell gets a fresh one and
+						// --- a snapshot revive instead of an "Engine has been shut down" for the rest of the session ---
+						this.state = "idle";
+						this.reapRecovery = true;
+						this.kernel.kill();
+						this.kernel = undefined;
+						this.startPromise = undefined;
+						this.helperReport = null;
+					}
+				}, this.abortGraceMs);
+				graceTimer.unref?.();
+			};
+			if (opts.signal) opts.signal.addEventListener("abort", onAbort, { once: true });
 			await this.start();
+			// --- reaped by a previous cell's expired grace: rebuild before this one runs, snapshot first ---
+			if (this.reapRecovery) {
+				this.reapRecovery = false;
+				await this.start();
+				await this.restoreWithReap().catch(() => null);
+				if (!this.isRunning) {
+					this.kernel = undefined;
+					this.startPromise = undefined;
+					await this.start();
+				}
+			}
 			// --- the kernel may have died after boot resolved but before its exit event; drop the zombie and rebuild ---
 			if (this.kernel && !this.kernel.isRunning) {
 				this.kernel = undefined;
@@ -332,25 +480,13 @@ export class EngineManager {
 			if (this.isShutdown()) {
 				throw new Error("Engine has been shut down");
 			}
+			// --- withdrawn during the boot: the cell was never submitted, so there is nothing to interrupt. The
+			// --- engine stays warm and the next cell is served normally. ---
+			if (withdrawn) {
+				return { stdout: "", stderr: "", status: "aborted", durationMs: Date.now() - started };
+			}
 
-			const started = Date.now();
-			const maxChars = opts.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
-			let aborted = false;
-			let graceTimer: ReturnType<typeof setTimeout> | undefined;
-			const onAbort = () => {
-				aborted = true;
-				this.kernel?.interrupt();
-				// --- interrupt is a real KeyboardInterrupt, but a C-wedged cell ignores it; then kill+rebuild ---
-				graceTimer = setTimeout(() => {
-					if (this.state === "running" && this.kernel) {
-						this.state = "shutdown";
-						this.kernel.kill();
-						this.kernel = undefined;
-					}
-				}, ABORT_GRACE_MS);
-				graceTimer.unref?.();
-			};
-			opts.signal?.addEventListener("abort", onAbort, { once: true });
+			const maxChars = opts.maxOutputChars ?? this.maxOutputCharsDefault;
 
 			try {
 				const r = await this.kernel!.executeCell(code, {
@@ -367,17 +503,42 @@ export class EngineManager {
 					else out = line.text;
 					return out;
 				};
+				const reapedError: EngineExecuteError | undefined = reapedDuringAbort
+					? {
+							name: "KernelReaped",
+							message:
+								`the cell ignored the interrupt for ${this.abortGraceMs / 1000}s — it was parked inside a C call, which no interrupt can cut — so the kernel was killed. ` +
+								"Every live object the cell held (COM proxy, open file, database connection) died with it; any namespace recovery comes from the last snapshot, not from memory.",
+							stack: [],
+						}
+					: undefined;
 				return {
 					stdout: finalize(r.stdout, r.truncated?.stdout ?? false),
 					stderr: finalize(r.stderr, r.truncated?.stderr ?? false),
 					result: r.result !== undefined ? finalize(String(r.result), String(r.result).length > maxChars) : undefined,
-					error: r.error,
+					error: reapedError ?? r.error,
 					status,
 					durationMs: Date.now() - started,
 				};
 			} catch (error) {
 				if (aborted) {
-					return { stdout: "", stderr: "", status: "aborted", durationMs: Date.now() - started };
+					return {
+						stdout: "",
+						stderr: "",
+						status: "aborted",
+						durationMs: Date.now() - started,
+						...(reapedDuringAbort
+							? {
+									error: {
+										name: "KernelReaped",
+										message:
+											`the cell ignored the interrupt for ${this.abortGraceMs / 1000}s — it was parked inside a C call, which no interrupt can cut — so the kernel was killed. ` +
+											"Every live object the cell held (COM proxy, open file, database connection) died with it.",
+										stack: [],
+									} satisfies EngineExecuteError,
+								}
+							: {}),
+					};
 				}
 				throw error;
 			} finally {
