@@ -21,7 +21,7 @@ It is **not** an interactive shell: the agent sends batches of Python to a kerne
 ## Install
 
 ```bash
-pi install github:3DAlgoLab/pi-repl-py
+pi install git:github.com/3DAlgoLab/pi-repl-py
 ```
 
 The postinstall builds the Python venv the kernel needs at `~/.pi/agent/pi-repl/venv`. If `python3` or the network is missing it says so plainly instead of half-building. On a clone, run `just setup` (`just setup --project` builds a project-local `.venv` instead). Termux needs `psutil` built from source: [docs/termux.md](docs/termux.md).
