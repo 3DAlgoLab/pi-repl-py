@@ -695,8 +695,8 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 		expect(r.stdout.length).toBeLessThan(4300);
 	});
 
-	// --- the nested-budget case: a caller with its own output ceiling — a pi-fabric program bounding every
-	// --- nested result at ~50,000 chars — sets the session cap once instead of passing maxOutputChars per cell.
+	// --- the nested-budget case: a caller with its own output ceiling for every result it collects sets the
+	// --- session cap once through the environment instead of passing maxOutputChars per cell.
 	test("PI_REPL_MAX_OUTPUT_CHARS caps cells that named no cap of their own", { timeout: 60_000 }, async () => {
 		const d = tempDir();
 		const m = engine({ cwd: d, env: { PI_REPL_MAX_OUTPUT_CHARS: "6000" } });

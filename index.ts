@@ -6,7 +6,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 import { resolveHelperDirs } from "./src/engine/helpers-locate.js";
 import { EngineManager, pruneOrphanedSnapshotDirs, pruneSnapshotDirs } from "./src/engine/index.js";
-import { formatDiagnostics, hostMode, toolsForHost } from "./src/extension/diagnostics.js";
+import { formatDiagnostics } from "./src/extension/diagnostics.js";
 import { buildHelpersPromptSection, listHelperNamesForCwd } from "./src/extension/helpers.js";
 import { buildPromptGuidelines, executePromptSnippet, executeToolDescription } from "./src/extension/prompt.js";
 import { ExecuteCellComponent, type ExecuteDetails, type ExecuteRenderState } from "./src/extension/render.js";
@@ -27,7 +27,7 @@ const executeSchema = Type.Object({
 	maxOutputChars: Type.Optional(
 		Type.Number({
 			description:
-				"Optional cap on characters returned across stdout and stderr. Set it lower when this call comes from another code-mode whose own output budget is shared across nested results (a pi-fabric program, say); the session default is 46080 and can be changed with PI_REPL_MAX_OUTPUT_CHARS.",
+				"Optional cap on characters returned across stdout and stderr. Set it lower when the caller has its own output budget shared across nested results; the session default is 46080 and can be changed with PI_REPL_MAX_OUTPUT_CHARS.",
 		}),
 	),
 });
@@ -62,10 +62,8 @@ function composeErrorLines(error: { name: string; message: string; stack: string
 }
 
 export default function (pi: ExtensionAPI) {
-	// --- host detection, not a mode option: pi-fabric owns the model-facing code-mode when it is loaded (its own
-	// --- code gates on this same check), and this extension becomes the durable-state sidecar it calls. No flag,
-	// --- no /repl on-off, no dormant state: the same binary is correct under either host.
-	const mode = () => hostMode(pi.getActiveTools());
+	// --- no mode option and no host to sense: the extension is always live, and `execute` is the model's tool surface.
+	// --- No flag, no /repl on-off, no dormant state.
 
 	let location = { cwd: process.cwd(), sessionFile: undefined as string | undefined };
 	// Pi rebuilds thrown errors as bare text; stash details to re-attach in tool_result.
@@ -127,16 +125,9 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		location = { cwd: ctx.cwd, sessionFile: ctx.sessionManager.getSessionFile() ?? undefined };
-		// --- one write to the tool surface, derived from the host: takeover collapses to execute, a Fabric host
-		// --- keeps every other tool and drops execute (a second code-mode in the prompt is the conflict itself)
+		// --- one write to the tool surface: active tools collapse to execute, so the prompt carries exactly one code-mode
 		const current = pi.getActiveTools();
-		const next = toolsForHost(current, mode());
-		if (next.join("\n") !== current.join("\n")) pi.setActiveTools(next);
-		if (mode() !== "takeover") {
-			// --- a Fabric session boots no Python until a program actually asks: Fabric's own programs are one-shot,
-			// --- so paying a 3 s boot + a resident kernel for a session that never calls the sidecar is pure waste
-			return;
-		}
+		if (current.length !== 1 || current[0] !== "execute") pi.setActiveTools(["execute"]);
 		// --- warm the engine in the background; acquire() dedupes, so the first execute awaits this same boot ---
 		const sessionKey = location.sessionFile ? conversationName(location.sessionFile) : undefined;
 		void lifecycle.acquire("startup", sessionKey).catch(() => {
@@ -145,14 +136,13 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// --- /repl reports the kernel; it used to flip a mode, and that flip was the hazard (restoring a captured
-	// --- tool loadout could silently drop another extension's tools, including fabric_exec)
+	// --- tool loadout could silently drop another extension's tools)
 	pi.registerCommand("repl", {
-		description: "Show the Python kernel's state: host, interpreter, pid, helpers, snapshot",
+		description: "Show the Python kernel's state: interpreter, pids, helpers, snapshot",
 		handler: async (_args, ctx) => {
 			const engine = lifecycle.peek();
 			ctx.ui.notify(
 				formatDiagnostics({
-					host: mode(),
 					enginePresent: engine !== undefined,
 					kernelState: engine?.bootState,
 					pid: engine?.pid,
@@ -185,9 +175,6 @@ export default function (pi: ExtensionAPI) {
 
 	// --- pi gates skills on the read tool (absent in repl); the helper roster is rebuilt per session from the session cwd, not the launch cwd, so resumes advertise what the kernel loaded ---
 	pi.on("before_agent_start", (event, ctx) => {
-		// --- under a Fabric host, Fabric composes the prompt; appending our roster there would advertise a tool
-		// --- the model cannot call. The sidecar is advertised to programs, not to the model.
-		if (mode() !== "takeover") return;
 		const skillsPrompt = withSkillsBlock(event.systemPrompt, event.systemPromptOptions?.skills ?? []);
 		let systemPrompt = skillsPrompt ?? event.systemPrompt;
 		const helpersBlock = buildHelpersPromptSection(ctx?.cwd ?? process.cwd());

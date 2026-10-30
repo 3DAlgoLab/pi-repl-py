@@ -8,7 +8,7 @@ the kernel without taking pi down; the host stays answerable.
 
 ```
 pi
- └─ extension (index.ts)              registers `execute`; host-aware (see Activation)
+ └─ extension (index.ts)              registers `execute`; the only tool (see Activation)
      └─ EngineManager (src/engine/index.ts)   venv resolution, lazy spawn,
          │                                   the call queue, output caps,
          │                                   abort grace, teardown
@@ -20,37 +20,25 @@ pi
                                  └─ ipykernel   the evaluator
 ```
 
-## Activation: one binary, two hosts
+## Activation: always live, one tool surface
 
-There is no flag and no mode switch. At `session_start` the extension reads the host from the tool
-surface — `pi.getActiveTools().includes("fabric_exec")`, the same check pi-fabric's own code gates
-on — and keeps whichever shape is correct:
-
-- **plain pi**: active tools collapse to `execute` — execute-only, exactly as 0.9.0 did. One
-  code-mode per prompt. Shell and file work inside a cell is plain Python (`subprocess.run`, `pathlib`,
-  ipython's `!cmd` and `%%bash`); there are **no** `bash(...)`/`read(...)`/`edit(...)`/`write(...)` wrapper
-  callables — commit 1708b75 retired the shipped toolbox in favour of the helpers-only model, and nothing
-  re-injects tool callables into the kernel namespace. The engine warms in the background and the helpers
-  block joins the prompt.
-- **pi-fabric loaded**: `fabric_exec` stays active and `execute` leaves the active set, so the
-  model's prompt still carries exactly one code-mode. Programs reach the persistent kernel as
-  `extensions["pi-repl-py"].execute`: Fabric moves captured custom tools out of the model's active
-  set by default and still lets a program call them, which is the documented seam. Fabric owns the
-  model, not the state — its programs start fresh on every call and cannot hold a native handle —
-  so a durable kernel is additive rather than redundant.
-
-Under a sidecar host the engine boots lazily on the first cell, so a session that never asks for
-Python starts no process; under takeover it warms at `session_start`, where the prompt already
-advertises `execute`.
+There is no flag and no mode switch. At `session_start` the extension collapses the model's tool
+surface to `execute` alone — execute-only, exactly as 0.9.0 did — so the prompt carries exactly one
+code-mode. Shell and file work inside a cell is plain Python (`subprocess.run`, `pathlib`, ipython's
+`!cmd` and `%%bash`); there are **no** `bash(...)`/`read(...)`/`edit(...)`/`write(...)` wrapper
+callables — commit 1708b75 retired the shipped toolbox in favour of the helpers-only model, and
+nothing re-injects tool callables into the kernel namespace. The helpers block joins the prompt, and
+the engine warms in the background at `session_start`, where the prompt already advertises `execute`
+— so the first cell awaits the boot it started rather than paying a second one.
 
 Changing the tool list at `session_start` is cheap since pi 0.86: tool declarations live in the
 transcript, so a change appends a delta (`toolsAdded`/`toolsRemoved`, section patches) instead of
 rewriting the cached message head. Providers that can express the transition (the newest Anthropic
 models) keep their prefix; the rest take a one-time miss.
 
-`/repl` is read-only diagnostics: host mode, the kernel's process roles with their pids, the
-interpreter the resolver chose, the helpers and the directories they were read from, and where the
-snapshot lives. It changes nothing, because there is nothing left to switch.
+`/repl` is read-only diagnostics: the kernel's process roles with their pids, the interpreter the
+resolver chose, the helpers and the directories they were read from, and where the snapshot lives. It
+changes nothing, because there is nothing left to switch.
 
 ## Why the boundary is one pipe
 

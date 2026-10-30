@@ -1,10 +1,10 @@
-# TODO — pi-repl-py: Windows + pi-fabric coexistence
+# TODO — pi-repl-py: Windows + reliability
 
-Decided design (2026-10-30): pi-fabric keeps the single model-facing code-mode. This extension is a
-**durable-state sidecar** — a real ipykernel that holds live objects (COM handles, open docs, loaded
-data) that a fresh-per-call guest cannot. Fabric's own programs (TS *and* Python) are stateless per
-call, verified; the DraftSight need for one persistent win32com connection is the founding case
-(D:/dev-pi/draftsight-com README:6-9).
+Design note (2026-10-30, later superseded): 0.10.1 shipped pi-fabric coexistence — the extension sensed
+`fabric_exec` in the tool surface and stepped aside as a durable-state **sidecar** instead of owning the
+model's tool surface. That host probe is now **removed**: the extension is always live and `execute` is
+always the model's tool surface. C2 and C5 below are reverted; C1, C3, C4, C6, C7 stand — none of them
+depended on which host was running.
 
 Order: A (Windows) → B (reliability) → C (coexistence). A before C because a coexistence design for an
 extension that cannot start on Windows is decoration.
@@ -47,22 +47,21 @@ extension that cannot start on Windows is decoration.
   `KernelClient`'s private constructor with a fake `send`/`handleLine`: id-routed stream+result, an `error`
   event rejecting a pending request, an error reply carrying the exec id, unparseable lines dropped.
 
-## C — pi-fabric coexistence (default ON, no knob)
+## C — coexistence work (C2 + C5 reverted; C1, C3, C4, C6, C7 stand)
 
 - [x] **C1 remove the flag**: no `--repl`, no dormancy throw, no `registerFlag`, no `PI_REPL_FORCE`. The tool
   registers on every `session_start`; the engine warms in the background under takeover and boots lazily under a
   sidecar host.
-- [x] **C2 host detection instead of a mode option**: `hostMode(pi.getActiveTools())` returns `sidecar` when
-  `fabric_exec` is in the loadout (Fabric gates on the same check, `chunk-R6EZAW76.js:6617`), leaving the tool
-  surface alone; `takeover` collapses it to `execute`. Both rules live in `src/extension/diagnostics.ts` and are
-  unit-tested.
+- [x] ~~**C2 host detection instead of a mode option**~~ — **reverted.** `hostMode`/`toolsForHost` are gone
+  along with the `fabric_exec` probe they were built around. `session_start` now always collapses the tool
+  surface to `execute` in one write, and the engine always warms in the background.
 - [x] **C3 delete the restore hazard**: `/repl on|off`, the stock-loadout capture, `restoredTools`, and
   `FALLBACK_TOOLS = ["read","bash","edit","write"]` are gone — that fallback would silently drop `fabric_exec`.
   `/repl` is now read-only diagnostics.
 - [x] **C4 nested-output budget**: `PI_REPL_MAX_OUTPUT_CHARS` sets the session cap (falls back to the 46,080
   default for junk or values under 512, which would produce output nobody can read), and a call can override it
-  with the new `maxOutputChars` tool argument. A caller with its own ceiling — a pi-fabric program bounding all
-  nested results near 50,000 chars — sets it once rather than per cell. Unit-tested for the resolution rule,
+  with the new `maxOutputChars` tool argument. Any caller with its own ceiling over nested results sets it once
+  rather than per cell. Unit-tested for the resolution rule,
   integration-tested for both the session default and the per-call override winning.
 - [x] **C7 an abort landing during cold boot is swallowed**: fixed. The abort listener and the grace timer
   are armed *before* `await this.start()`, and a cell withdrawn during boot is cancelled at the submission point
@@ -73,8 +72,8 @@ extension that cannot start on Windows is decoration.
   `reapRecovery`, and clears `startPromise`/`helperReport`; the **next** cell boots a fresh kernel and takes the
   existing `restoreWithReap()` path, snapshot revived ahead of it. One wedged DraftSight RPC plus one Ctrl-C no
   longer ends the session's Python. The reap test now also asserts the following cell is served.
-- [x] **C5 prompt scoping**: the skills block and the helper/system append happen only under takeover; under
-  Fabric the extension adds nothing to the prompt and stays program-callable.
+- [x] **C5 prompt scoping** — simplified with C2 gone: the skills block and the helper append apply on every
+  `before_agent_start`; there is no host branch to skip them for.
 
 ## D — verification
 

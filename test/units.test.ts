@@ -22,7 +22,7 @@ import {
 } from "../src/engine/index.js";
 import { type CellResult, KernelClient } from "../src/engine/kernel.js";
 import { pythonCandidates } from "../src/engine/python-locate.js";
-import { formatDiagnostics, hostMode, toolsForHost } from "../src/extension/diagnostics.js";
+import { formatDiagnostics } from "../src/extension/diagnostics.js";
 import { buildHelpersMap, buildHelpersMapForCwd, buildHelpersPromptSection } from "../src/extension/helpers.js";
 import { buildPromptGuidelines } from "../src/extension/prompt.js";
 import {
@@ -714,38 +714,15 @@ describe("per-line output cap", () => {
 	});
 });
 
-describe("host detection and /repl diagnostics", () => {
-	test("plain pi takes over; a pi-fabric host makes this extension a sidecar", () => {
-		expect(hostMode(["read", "bash", "edit", "write"])).toBe("takeover");
-		expect(hostMode(["fabric_exec", "read"])).toBe("sidecar");
-		// an unrelated extension whose name merely contains the word must not flip the host
-		expect(hostMode(["fabric_helper", "read"])).toBe("takeover");
-	});
-
-	test("the tool surface: takeover collapses, a fabric host keeps fabric_exec and drops execute", () => {
-		expect(toolsForHost(["read", "bash", "execute"], "takeover")).toEqual(["execute"]);
-		// what the old restoredTools()/FALLBACK_TOOLS path got wrong: a hardcoded restore could re-add
-		// read/bash/edit/write and silently drop fabric_exec, breaking the host we are sharing pi with
-		expect(toolsForHost(["fabric_exec", "read", "bash", "execute"], "sidecar")).toEqual([
-			"fabric_exec",
-			"read",
-			"bash",
-		]);
-		// never invent tools that were not active, and never restore an empty surface
-		expect(toolsForHost([], "sidecar")).toEqual([]);
-		expect(toolsForHost(["execute"], "sidecar")).toEqual([]);
-	});
-
+describe("/repl diagnostics", () => {
 	test("diagnostics reports no kernel without booting one", () => {
-		const text = formatDiagnostics({ host: "sidecar", enginePresent: false, helperNames: [], helperDirs: [] });
-		expect(text).toContain("sidecar");
+		const text = formatDiagnostics({ enginePresent: false, helperNames: [], helperDirs: [] });
 		expect(text).toContain("not started");
-		expect(text.split("\n")).toHaveLength(2);
+		expect(text.split("\n")).toHaveLength(1);
 	});
 
 	test("diagnostics prints the process roles, the interpreter rule, helpers and their dirs, and the snapshot", () => {
 		const text = formatDiagnostics({
-			host: "takeover",
 			enginePresent: true,
 			kernelState: "running",
 			pid: 6692,
@@ -765,7 +742,6 @@ describe("host detection and /repl diagnostics", () => {
 		// POSIX: the spawned process IS the bridge, so no "launcher" role is invented
 		expect(
 			formatDiagnostics({
-				host: "takeover",
 				enginePresent: true,
 				kernelState: "running",
 				pid: 7,
@@ -778,7 +754,6 @@ describe("host detection and /repl diagnostics", () => {
 		// POSIX has no launcher stub, so it must not be told to reach for taskkill
 		expect(
 			formatDiagnostics({
-				host: "takeover",
 				enginePresent: true,
 				kernelState: "running",
 				pid: 7,
@@ -796,7 +771,6 @@ describe("host detection and /repl diagnostics", () => {
 
 	test("an ephemeral session says snapshots are disabled instead of implying one exists", () => {
 		const text = formatDiagnostics({
-			host: "takeover",
 			enginePresent: true,
 			kernelState: "idle",
 			helperNames: [],
@@ -805,7 +779,6 @@ describe("host detection and /repl diagnostics", () => {
 		expect(text).toContain("snapshot: disabled (ephemeral session)");
 		// a real state dir with nothing flushed yet is a different fact, and must not read as "disabled"
 		const fresh = formatDiagnostics({
-			host: "takeover",
 			enginePresent: true,
 			kernelState: "idle",
 			helperNames: [],
@@ -817,7 +790,7 @@ describe("host detection and /repl diagnostics", () => {
 	});
 });
 
-describe("skills advertisement on a takeover host (withSkillsBlock)", () => {
+describe("skills advertisement (withSkillsBlock)", () => {
 	const skill = {
 		name: "session-memory",
 		description: "Recall past pi conversations from session history.",
@@ -1571,9 +1544,9 @@ describe("bridge pipe routing", () => {
 });
 
 describe("output budget", () => {
-	// A model browsing a REPL wants a cell's whole output. A caller that is itself bounded — a pi-fabric program
-	// with one ~50,000-char budget shared across every nested result — does not want one cell to spend it, so the
-	// session default has to be overridable from the environment as well as per call.
+	// A model browsing a REPL wants a cell's whole output. A caller that is itself bounded — one budget shared
+	// across every nested result it collects — does not want one cell to spend it, so the session default has to be
+	// overridable from the environment as well as per call.
 	test("PI_REPL_MAX_OUTPUT_CHARS sets the per-cell cap", () => {
 		expect(new EngineManager({ env: { PI_REPL_MAX_OUTPUT_CHARS: "12000" } }).outputCharBudget).toBe(12000);
 		expect(new EngineManager({}).outputCharBudget).toBe(DEFAULT_MAX_OUTPUT_CHARS);

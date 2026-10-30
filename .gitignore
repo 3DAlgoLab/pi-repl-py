@@ -8,7 +8,7 @@ dist/
 .nvim/
 
 __pycache__/
-# scratch probes written while working the Windows/Fabric bugs; not part of the package
+# scratch probes written while debugging; not part of the package
 .smoke/
 .probe/
 *.pyc

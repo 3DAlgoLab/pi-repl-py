@@ -1,31 +1,13 @@
 /**
- * Read-only kernel diagnostics for /repl, plus the host-detection rules that replaced the old --repl flag.
+ * Read-only kernel diagnostics for /repl.
  *
- * There is no mode switch any more: pi-fabric owns the model-facing code-mode when it is loaded, and this
- * extension becomes a durable-state sidecar it can call. Fabric's own code gates on the same
- * `getActiveTools().includes("fabric_exec")` check, so this is the sanctioned way to sense the host. Keeping the
- * rule and the formatting here (not inline in index.ts) is what makes them unit-testable without a live pi.
+ * There is no mode switch and no host to sense: the extension is always live and `execute` is always the
+ * model's tool surface. Keeping the formatting here (not inline in index.ts) is what makes it unit-testable
+ * without a live pi.
  */
-
-export type HostMode = "takeover" | "sidecar";
-
-/** Plain pi → this extension is the tool surface (the 0.9.0 behaviour). pi-fabric loaded → it is not. */
-export function hostMode(activeTools: readonly string[]): HostMode {
-	return activeTools.includes("fabric_exec") ? "sidecar" : "takeover";
-}
-
-/**
- * The model's tool surface for this host. Under Fabric, `execute` must leave the active set: a second
- * code-mode in the prompt is exactly the conflict, and programs still reach it as
- * `extensions."pi-repl-py".execute`. A takeover collapses to execute-only, as 0.9.0 did.
- */
-export function toolsForHost(active: readonly string[], mode: HostMode): string[] {
-	return mode === "takeover" ? ["execute"] : active.filter((tool) => tool !== "execute");
-}
 
 export interface DiagnosticsView {
-	host: HostMode;
-	/** True when an engine exists for this conversation (it boots lazily under a sidecar host). */
+	/** True when an engine exists for this conversation (it warms at session_start). */
 	enginePresent: boolean;
 	kernelState?: "idle" | "starting" | "running" | "shutdown";
 	/** Process we spawned — the venv launcher on Windows, the interpreter itself on POSIX. */
@@ -64,11 +46,6 @@ function pidSuffix(v: DiagnosticsView): string {
 /** One line per fact, sized for a toast; nothing here can change state. */
 export function formatDiagnostics(v: DiagnosticsView): string {
 	const lines: string[] = [];
-	lines.push(
-		v.host === "takeover"
-			? "host: pi (execute is the model's tool surface)"
-			: "host: pi-fabric (execute is a sidecar; call it from a program)",
-	);
 	if (!v.enginePresent) {
 		lines.push("engine: not started — it boots on the first cell");
 		return lines.join("\n");

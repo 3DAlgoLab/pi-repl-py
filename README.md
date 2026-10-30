@@ -30,8 +30,7 @@ The postinstall builds the Python venv the kernel needs at `~/.pi/agent/pi-repl/
 
 Start `pi` and send Python. There is no flag and nothing to switch on.
 
-- **Plain pi** — active tools collapse to `execute` alone, one code-mode per prompt. Nothing is missing inside a cell: shell and files are plain Python there (`subprocess.run`, `pathlib`, and ipython's `!cmd` and `%%bash`). There are no `bash(...)`/`read(...)` wrapper callables — that toolbox was removed in favour of helpers.
-- **With pi-fabric** — `fabric_exec` stays active and `execute` leaves the model's tool set; a program reaches the same persistent kernel as `extensions["pi-repl-py"].execute(...)`. Fabric's own programs are stateless per call, so this is the durable-state sidecar they reach for. The host is detected from the active tool list at session start, and the prompt carries exactly one code-mode either way.
+At `session_start` the active tools collapse to `execute` alone, so the prompt carries exactly one code-mode. Nothing is missing inside a cell: shell and files are plain Python there (`subprocess.run`, `pathlib`, and ipython's `!cmd` and `%%bash`). There are no `bash(...)`/`read(...)` wrapper callables — that toolbox was removed in favour of helpers.
 
 A cell that raises reports the traceback and the kernel keeps going. `/repl` prints diagnostics: process roles and pids, the interpreter chosen, the helpers loaded and where they came from, the snapshot location. It changes nothing.
 
@@ -64,7 +63,7 @@ Resolution lives in `src/engine/python-locate.ts`; a candidate that cannot impor
 | `PI_HELPERS_DIR` | use exactly one helpers directory and skip the normal project-then-global walk |
 | `PI_REPL_TIMEOUT_MS` | per-cell wall clock, 0 (off) by default |
 | `PI_REPL_ABORT_GRACE_MS` | how long an aborted cell gets before the kernel is reaped (5000) |
-| `PI_REPL_MAX_OUTPUT_CHARS` | per-cell output cap, 46,080 by default; 4,096 per line, cuts marked. A caller with its own budget — a Fabric program bounding nested results near 50,000 — wants this lower; one call can override it with `maxOutputChars` |
+| `PI_REPL_MAX_OUTPUT_CHARS` | per-cell output cap, 46,080 by default; 4,096 per line, cuts marked. A caller with one budget shared across many results wants this lower; one call can override it with `maxOutputChars` |
 
 ## It is not
 
@@ -75,7 +74,7 @@ Resolution lives in `src/engine/python-locate.ts`; a candidate that cannot impor
 ## More
 
 - [docs/design.md](docs/design.md) — why this design
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — venv, kernel, process tree, host detection
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — venv, kernel, process tree, tool surface
 - [docs/helpers.md](docs/helpers.md) — writing helpers
 - [example/](example/) — helpers and skills to copy
 

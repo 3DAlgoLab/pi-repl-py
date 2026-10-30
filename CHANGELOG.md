@@ -1,3 +1,20 @@
+## [0.10.2] - 2026-10-30
+
+### Removed (breaking)
+
+- pi-fabric coexistence. The `fabric_exec` host probe and the `hostMode` / `toolsForHost` rules built on it are
+  gone: the extension no longer senses which code-mode owns the prompt, it owns the model's tool surface.
+  `session_start` collapses active tools to `execute` in one write, the engine always warms in the background,
+  and the skills block plus the helper roster always join the prompt. The sidecar's lazy first-cell boot goes
+  with the branch that needed it, and `docs/ARCHITECTURE.md` now documents one activation path instead of two.
+- The host line in `/repl`. The command reports the interpreter, the process roles and their pids, the helpers
+  and their directories, and the snapshot location — nothing else, because nothing is left to switch.
+
+### Notes
+
+- `PI_REPL_MAX_OUTPUT_CHARS` and the per-call `maxOutputChars` argument stay. They bound output for any caller
+  with its own budget over nested results; only their prose named one such caller.
+
 ## [0.10.1] - 2026-10-30
 
 ### Added

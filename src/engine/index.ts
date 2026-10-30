@@ -217,7 +217,7 @@ export class EngineManager {
 	/**
 	 * Output cap applied when a caller does not name one. Env-overridable because the right number depends on who
 	 * is reading: a model browsing a REPL wants everything, while a caller with its own shared output budget
-	 * (a pi-fabric program bounding nested results at ~50,000 chars) wants one cell not to spend it all.
+	 * spread across many results wants one cell not to spend it all.
 	 */
 	private readonly maxOutputCharsDefault: number;
 	/**
