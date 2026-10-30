@@ -1,11 +1,8 @@
 # Helpers
 
-Helpers are optional Python files that pi-repl loads into the persistent workspace. Use one when
-code is worth reusing. A helper can also give the model a reliable wrapper instead of making it
-rebuild the same plumbing in every cell.
+Helpers are optional Python files that pi-repl loads into the persistent workspace. Use one when code is worth reusing. A helper can also give the model a reliable wrapper instead of making it rebuild the same plumbing in every cell.
 
-A helper can define a function, class, constant, import, or configured object. The filename labels the helper entry shown in the prompt. It does not have to match a function
-name or any other public name in the file.
+A helper can define a function, class, constant, import, or configured object. The filename labels the helper entry shown in the prompt. It does not have to match a function name or any other public name in the file.
 
 ## Where helpers live
 
@@ -16,19 +13,13 @@ Helpers come from two places: a **project** directory and a **global** directory
 ~/.pi/agent/pi-repl/helpers/           global helpers (every project)
 ```
 
-The global directory is created empty when pi-repl is installed. In a project, any
-`.pi/helpers/` directory is picked up by walking up from the working directory to the
-git repo root, so a helper works no matter how deep in the project you are.
+The global directory is created empty when pi-repl is installed. In a project, any `.pi/helpers/` directory is picked up by walking up from the working directory to the git repo root, so a helper works no matter how deep in the project you are.
 
-Every `.py` file found is loaded when the evaluator starts; files whose names begin with
-`_` are ignored.
+Every `.py` file found is loaded when the evaluator starts; files whose names begin with `_` are ignored.
 
-The two tiers merge: a project helper **shadows** a same-named global helper, and global
-helpers fill in whatever the project does not define. One file name appears once in the
-tool prompt and once in the kernel.
+The two tiers merge: a project helper **shadows** a same-named global helper, and global helpers fill in whatever the project does not define. One file name appears once in the tool prompt and once in the kernel.
 
-After adding, changing, renaming, or disabling a helper, run `/reload` or start a new
-`pi` session. The running evaluator does not watch the directories for changes.
+After adding, changing, renaming, or disabling a helper, run `/reload` or start a new `pi` session. The running evaluator does not watch the directories for changes.
 
 ## A small function helper
 
@@ -79,12 +70,9 @@ A helper may define `helper_description`:
 helper_description = """double(x) — multiply a value by two."""
 ```
 
-The value must be a **triple-quoted string** (`"""..."""` or `'''...'''`): a plain-quoted
-assignment is not recognized, and the helper is advertised with a pointer text telling the
-model to inspect it (`print(double.__doc__)`) instead.
+The value must be a **triple-quoted string** (`"""..."""` or `'''...'''`): a plain-quoted assignment is not recognized, and the helper is advertised with a pointer text telling the model to inspect it (`print(double.__doc__)`) instead.
 
-The host reads this value and puts it in the `execute` tool description verbatim. It is guidance for the model, not a registration mechanism or generated API. Keep it short: it
-is included in the model's context on every turn.
+The host reads this value and puts it in the `execute` tool description verbatim. It is guidance for the model, not a registration mechanism or generated API. Keep it short: it is included in the model's context on every turn.
 
 A useful description answers three questions:
 
@@ -131,24 +119,17 @@ At startup, two parts of pi-repl read the same merged helper list (project dirs 
 1. The kernel executes each eligible `.py` file. Its definitions become names in the Python workspace.
 2. The host reads `helper_description` to build the helper guidance shown to the model.
 
-Both resolve the list from the **session's working directory** (not the folder pi was launched
-from), so a resumed session advertises exactly the helpers its kernel loads. The per-session
-list is rebuilt at every agent start and stated in the system prompt.
+Both resolve the list from the **session's working directory** (not the folder pi was launched from), so a resumed session advertises exactly the helpers its kernel loads. The per-session list is rebuilt at every agent start and stated in the system prompt.
 
-Each helper file executes in its **own cell**, so a broken helper (a syntax error or a top-level
-raise) fails alone and does not stop the others. When a helper fails to load, the next cell's
-output carries a `<repl_helpers_failed: name (error)>` line, and you get a toast; an
-all-good boot stays silent.
+Each helper file executes in its **own cell**, so a broken helper (a syntax error or a top-level raise) fails alone and does not stop the others. When a helper fails to load, the next cell's output carries a `<repl_helpers_failed: name (error)>` line, and you get a toast; an all-good boot stays silent.
 
-The host does not inspect `def` lines or infer signatures from filenames. A helper does not need to define one particular symbol. The file is the unit of loading; its public names are the names it defines or imports for use in
-the workspace.
+The host does not inspect `def` lines or infer signatures from filenames. A helper does not need to define one particular symbol. The file is the unit of loading; its public names are the names it defines or imports for use in the workspace.
 
 Because helpers execute at kernel startup, top-level code has consequences. Definitions are fine; imports should be reasonable; network calls, prints, subprocesses, and expensive work should usually happen inside an explicit function or method call.
 
 ## Third-party packages in the install venv
 
-The evaluator runs from a real Python virtualenv (`~/.pi/agent/pi-repl/venv`); `sys.path` includes
-its `site-packages`. Packages you install there are importable from helpers and from any cell:
+The evaluator runs from a real Python virtualenv (`~/.pi/agent/pi-repl/venv`); `sys.path` includes its `site-packages`. Packages you install there are importable from helpers and from any cell:
 
 ```bash
 ~/.pi/agent/pi-repl/venv/bin/pip3 install -U numpy pandas
@@ -158,12 +139,9 @@ its `site-packages`. Packages you install there are importable from helpers and 
 import numpy as np
 ```
 
-That is how a helper reaches a package the repl does not ship by default (the venv is created
-minimal — it has no `requests`, `numpy`, `pandas`, etc.). ipykernel only pulls its own dependencies.
+That is how a helper reaches a package the repl does not ship by default (the venv is created minimal — it has no `requests`, `numpy`, `pandas`, etc.). ipykernel only pulls its own dependencies.
 
-Because it is a project-local venv, the packages you add are personal to you: nothing about them
-ships with pi-repl. A helper that depends on a package runs only on machines that have installed
-it, so say so in the helper description or docstring when your helper imports one.
+Because it is a project-local venv, the packages you add are personal to you: nothing about them ships with pi-repl. A helper that depends on a package runs only on machines that have installed it, so say so in the helper description or docstring when your helper imports one.
 
 ## Choosing what belongs in a helper
 
@@ -206,9 +184,7 @@ The prompt guidance and kernel namespace are established during startup. Run `/r
 
 ### A helper hides the decision
 
-A helper can normalize responses or manage retries. For example, the web helper can hide
-provider authentication and fallback. It should not silently decide which source proves a claim
-or which file should be edited; those decisions belong to the model.
+A helper can normalize responses or manage retries. For example, the web helper can hide provider authentication and fallback. It should not silently decide which source proves a claim or which file should be edited; those decisions belong to the model.
 
 ## Disable a helper without deleting it
 

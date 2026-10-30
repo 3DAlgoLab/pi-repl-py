@@ -30,7 +30,8 @@ export interface CellResult {
 	result?: string;
 	error?: { name: string; message: string; stack: string[] };
 	status: "ok" | "error" | "aborted";
-	truncated?: { stdout: boolean; stderr: boolean };
+	/** Per channel: the flag plus how many chars fell off, so the cap marker can name the loss. */
+	truncated?: { stdout: boolean; stderr: boolean; stdoutDropped?: number; stderrDropped?: number };
 }
 
 export interface CellOptions {
@@ -70,6 +71,9 @@ interface ActiveCell {
 	stderr: string[];
 	outLen: number;
 	errLen: number;
+	/** Chars dropped past the channel cap; the cap marker reports the loss. */
+	outDropped: number;
+	errDropped: number;
 	maxChars: number;
 	result?: string;
 	error?: { name: string; message: string; stack: string[] };
@@ -350,6 +354,8 @@ export class KernelClient {
 			stderr: [],
 			outLen: 0,
 			errLen: 0,
+			outDropped: 0,
+			errDropped: 0,
 			maxChars,
 			lastActivity: Date.now(),
 			timedOut: false,
@@ -393,7 +399,12 @@ export class KernelClient {
 			result: undefined,
 			error: active.error,
 			status: "error",
-			truncated: { stdout: active.stdoutTruncated, stderr: active.stderrTruncated },
+			truncated: {
+				stdout: active.stdoutTruncated,
+				stderr: active.stderrTruncated,
+				stdoutDropped: active.outDropped,
+				stderrDropped: active.errDropped,
+			},
 		});
 	}
 
@@ -460,7 +471,12 @@ export class KernelClient {
 			result: active.result,
 			error: active.error,
 			status,
-			truncated: { stdout: active.stdoutTruncated, stderr: active.stderrTruncated },
+			truncated: {
+				stdout: active.stdoutTruncated,
+				stderr: active.stderrTruncated,
+				stdoutDropped: active.outDropped,
+				stderrDropped: active.errDropped,
+			},
 		});
 	}
 
@@ -476,8 +492,13 @@ export class KernelClient {
 		}
 		// one oversized stream frame (10 MB print) overflows the cap within this call
 		if (text.length > keep) {
-			if (name === "stdout") active.stdoutTruncated = true;
-			else active.stderrTruncated = true;
+			if (name === "stdout") {
+				active.stdoutTruncated = true;
+				active.outDropped += text.length - keep;
+			} else {
+				active.stderrTruncated = true;
+				active.errDropped += text.length - keep;
+			}
 		}
 		// beyond the cap we drop text but keep draining
 		active.onStream?.(text.slice(0, keep), name);

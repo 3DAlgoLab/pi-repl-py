@@ -61,7 +61,7 @@ Resolution lives in `src/engine/python-locate.ts`; a candidate that cannot impor
 | `PI_PROJECT_VENV=1` | the project's `.venv` wins; its `pyvenv.cfg` authorises that project's `PYTHONPATH`, nothing else |
 | `PI_HELPERS_GLOBAL_DIR` | change the global helpers directory (default `~/.pi/agent/pi-repl/helpers`) |
 | `PI_HELPERS_DIR` | use exactly one helpers directory and skip the normal project-then-global walk |
-| `PI_REPL_TIMEOUT_MS` | per-cell wall clock, 0 (off) by default |
+| `PI_REPL_TIMEOUT_MS` | silence watchdog: interrupt a cell after this long with no output; 0 (off) by default |
 | `PI_REPL_ABORT_GRACE_MS` | how long an aborted cell gets before the kernel is reaped (5000) |
 | `PI_REPL_MAX_OUTPUT_CHARS` | per-cell output cap, 46,080 by default; 4,096 per line, cuts marked. A caller with one budget shared across many results wants this lower; one call can override it with `maxOutputChars` |
 

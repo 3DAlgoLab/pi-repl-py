@@ -1,19 +1,11 @@
 # Termux / Android setup
 
-On **Termux (Android)**, the `postinstall` venv build can fail because `ipykernel` depends on
-`psutil`, and PyPI does not provide a compatible Android wheel. Two common alternatives do not
-solve the problem:
+On **Termux (Android)**, the `postinstall` venv build can fail because `ipykernel` depends on `psutil`, and PyPI does not provide a compatible Android wheel. Two common alternatives do not solve the problem:
 
-- `pkg install python-psutil`: Termux's `.deb` post-install runs the same failing `pip install
-  psutil`, so no usable psutil is left.
-- `pip install psutil-android`: the prebuilt `.so` links `libpython3.14.so`; on an older
-  Termux Python it fails with `dlopen failed: library "libpython3.14.so" not found`. It works
-  only when Termux's Python matches the wheel's ABI (currently 3.14).
+- `pkg install python-psutil`: Termux's `.deb` post-install runs the same failing `pip install psutil`, so no usable psutil is left.
+- `pip install psutil-android`: the prebuilt `.so` links `libpython3.14.so`; on an older Termux Python it fails with `dlopen failed: library "libpython3.14.so" not found`. It works only when Termux's Python matches the wheel's ABI (currently 3.14).
 
-The reliable route is to build the documented `psutil` release from source with a small
-Android-specific change, then install the evaluator venv. Run these commands from a writable
-working directory. If the release changes, update the source URL, version numbers, and patch
-before running them:
+The reliable route is to build the documented `psutil` release from source with a small Android-specific change, then install the evaluator venv. Run these commands from a writable working directory. If the release changes, update the source URL, version numbers, and patch before running them:
 
 ```bash
 # 1. show a compiler + Python headers
@@ -46,4 +38,3 @@ pi
 ```
 
 The venv already contains the working `ipykernel` that the evaluator needs.
-

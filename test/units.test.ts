@@ -19,12 +19,14 @@ import {
 	MAX_OUTPUT_LINE_CHARS,
 	pruneOrphanedSnapshotDirs,
 	pruneSnapshotDirs,
+	truncateWithMarker,
 } from "../src/engine/index.js";
 import { type CellResult, KernelClient } from "../src/engine/kernel.js";
 import { pythonCandidates } from "../src/engine/python-locate.js";
 import { formatDiagnostics } from "../src/extension/diagnostics.js";
+import { composeErrorLines, ERROR_STACK_LINES } from "../src/extension/error-format.js";
 import { buildHelpersMap, buildHelpersMapForCwd, buildHelpersPromptSection } from "../src/extension/helpers.js";
-import { buildPromptGuidelines } from "../src/extension/prompt.js";
+import { buildPromptGuidelines, executeToolDescription } from "../src/extension/prompt.js";
 import {
 	backgroundFor,
 	closeOpenSgr,
@@ -301,6 +303,10 @@ describe("helper boot announcements", () => {
 	test("static guidelines carry no roster and no helper marker; the per-session block carries both", () => {
 		const bullets = buildPromptGuidelines();
 		expect(bullets.some((b) => b.includes("<repl_engine_reset>"))).toBe(true);
+		// the model has no other tool; the prompt must say so and give the replacement idiom
+		expect(bullets.some((b) => b.includes("no read/edit/write/bash tool"))).toBe(true);
+		expect(bullets.some((b) => b.includes("pathlib") && b.includes("subprocess"))).toBe(true);
+		expect(executeToolDescription).toContain("only tool");
 		expect(bullets.some((b) => b.includes("Preloaded helpers"))).toBe(false); // the roster moves to the system prompt
 		expect(bullets.some((b) => b.includes("<repl_helpers_failed>"))).toBe(false); // ...and so does its marker note
 
@@ -711,6 +717,59 @@ describe("per-line output cap", () => {
 		expect(a).toBe("ok");
 		expect(b.length).toBe(MAX_OUTPUT_LINE_CHARS);
 		expect(c).toBe("fine");
+	});
+});
+
+describe("channel cap marker: say what was lost and how to get it back", () => {
+	test("output inside the cap is returned untouched", () => {
+		expect(truncateWithMarker("short output\n", 100, false)).toBe("short output\n");
+	});
+
+	test("the marker names the cap, counts the loss, and points at a recovery", () => {
+		const out = truncateWithMarker("y".repeat(100), 40, true, 9_900);
+		expect(out.split("\n")[0]).toHaveLength(40);
+		// kept 40 of a 10_000-char channel: 60 cut here plus 9_900 the channel already dropped
+		expect(out).toContain("output truncated at 40 chars, 9960 dropped");
+		expect(out).toContain("write it to a file");
+	});
+
+	test("text the channel dropped before reaching the engine is counted too", () => {
+		const out = truncateWithMarker("z".repeat(40), 40, true, 12_000);
+		expect(out).toContain("output truncated at 40 chars, 12000 dropped");
+	});
+
+	test("a cut the engine itself makes is counted from the text it holds", () => {
+		const out = truncateWithMarker("w".repeat(90), 40, false);
+		expect(out).toContain("output truncated at 40 chars, 50 dropped");
+	});
+});
+
+describe("cell error stacks: the frame that raised must survive", () => {
+	test("a short traceback is passed through whole, header first", () => {
+		const lines = composeErrorLines({
+			name: "ValueError",
+			message: "bad",
+			stack: ['  File "a.py"', "  line 1", "  boom"],
+		});
+		expect(lines).toEqual(["ValueError: bad", '  File "a.py"', "  line 1", "  boom"]);
+	});
+
+	test("a long traceback keeps head and tail, and counts what sits between", () => {
+		const frames = Array.from({ length: 40 }, (_, i) => `frame ${i}`);
+		const lines = composeErrorLines({ name: "RuntimeError", message: "boom", stack: frames });
+		expect(lines[0]).toBe("RuntimeError: boom");
+		expect(lines[1]).toBe("frame 0");
+		expect(lines[lines.length - 1]).toBe("frame 39"); // the raising frame is last, so it survives
+		const marker = lines.find((l) => l.includes("omitted"));
+		expect(marker).toContain(`${40 - ERROR_STACK_LINES + 1} traceback lines omitted`);
+		// head + marker + tail fit the same budget the old head-only cut used
+		expect(lines).toHaveLength(1 + ERROR_STACK_LINES);
+	});
+
+	test("a stack that already opens with the header gets no second copy", () => {
+		const lines = composeErrorLines({ name: "KeyError", message: "k", stack: ["KeyError: k", "  f1"] });
+		expect(lines.filter((l) => l === "KeyError: k")).toHaveLength(1);
+		expect(lines).toEqual(["KeyError: k", "  f1"]);
 	});
 });
 

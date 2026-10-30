@@ -7,6 +7,7 @@ import { Type } from "typebox";
 import { resolveHelperDirs } from "./src/engine/helpers-locate.js";
 import { EngineManager, pruneOrphanedSnapshotDirs, pruneSnapshotDirs } from "./src/engine/index.js";
 import { formatDiagnostics } from "./src/extension/diagnostics.js";
+import { composeErrorLines } from "./src/extension/error-format.js";
 import { buildHelpersPromptSection, listHelperNamesForCwd } from "./src/extension/helpers.js";
 import { buildPromptGuidelines, executePromptSnippet, executeToolDescription } from "./src/extension/prompt.js";
 import { ExecuteCellComponent, type ExecuteDetails, type ExecuteRenderState } from "./src/extension/render.js";
@@ -49,16 +50,6 @@ function syncRenderState(
 	state.executionStarted = context.executionStarted;
 	state.hasResult = state.hasResult ?? false;
 	return state as ExecuteRenderState;
-}
-
-/** Stack lines kept when surfacing a cell error to the model. */
-const ERROR_STACK_LINES = 10;
-
-/** Header plus stack — without repeating the header when the stack already starts with it. */
-function composeErrorLines(error: { name: string; message: string; stack: string[] }): string[] {
-	const header = `${error.name}: ${error.message}`;
-	const stack = error.stack.slice(0, ERROR_STACK_LINES);
-	return stack[0]?.trim() === header ? stack : [header, ...stack];
 }
 
 export default function (pi: ExtensionAPI) {

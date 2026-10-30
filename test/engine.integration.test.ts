@@ -681,6 +681,10 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 			expect(r.status).toBe("ok");
 			expect(r.stdout.length).toBeGreaterThan(4000);
 			expect(r.stdout).toContain("output truncated at 4096 chars");
+			// the marker must price the cut: most of the 20M-char channel fell off, and the model is told so
+			const dropped = Number(/, (\d+) dropped/.exec(r.stdout)?.[1]);
+			expect(dropped).toBeGreaterThan(19_000_000);
+			expect(r.stdout).toContain("dropped — print the slice you need");
 		},
 	);
 
@@ -692,7 +696,11 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 		const r = await m.execute("print('x' * 10_000_000)", { maxOutputChars: 65536 });
 		expect(r.status).toBe("ok");
 		expect(r.stdout).toContain("some lines exceeded 4096 chars");
-		expect(r.stdout.length).toBeLessThan(4300);
+		// the body stays at the per-line cap; only the cap markers ride along beside it
+		const [body, ...markers] = r.stdout.split("\n");
+		expect(body).toHaveLength(4096);
+		expect(markers.length).toBeLessThanOrEqual(2);
+		expect(r.stdout.length).toBeLessThan(4096 + 400);
 	});
 
 	// --- the nested-budget case: a caller with its own output ceiling for every result it collects sets the

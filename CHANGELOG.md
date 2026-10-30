@@ -1,3 +1,29 @@
+## [0.10.3] - 2026-10-30
+
+### Added
+
+- The prompt says what `execute` replaces. The tool is the model's only tool, and the description now states it; one more
+  guideline carries the idiom that stands in for the read/edit/write/bash tools: patch files through `pathlib` after
+  asserting the exact text being replaced, and run commands with `subprocess.run([...])`.
+
+### Changed
+
+- The output cap marker names its cost. A cut channel used to end in `[... output truncated at 46080 chars ...]`:
+  something was lost, with no size attached and no way back. The kernel now counts the characters it dropped past the cap,
+  and the marker reports the cap, the count, and the two ways to get that text back — print the slice, or write it to a
+  file and read it back. The per-line cut's marker got the same treatment.
+- A cell error keeps both ends of its traceback. Python puts the frame that raised last, so the old head-only cut to ten
+  stack lines deleted exactly the frame worth reading, and said nothing. The `ename: evalue` header still leads; past the
+  budget the head keeps the call path, the tail keeps the raising frame, and a marker counts the lines between them. The
+  total stays at eleven lines, and the formatting moved to `src/extension/error-format.ts` so its edge cases are testable
+  without a live kernel.
+
+### Fixed
+
+- `docs/ARCHITECTURE.md` promised a 20-second abort grace; `PI_REPL_ABORT_GRACE_MS` is 5000. The same file's failure table
+  implied the silence watchdog runs by default, and README called `PI_REPL_TIMEOUT_MS` a per-cell wall clock; it measures
+  silence, and it is off by default, so a wedged cell runs until something cancels it. Both now match the code.
+
 ## [0.10.2] - 2026-10-30
 
 ### Removed (breaking)

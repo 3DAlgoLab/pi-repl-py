@@ -117,9 +117,21 @@ function installProcessCleanupOnce(): void {
 	});
 }
 
-function truncateWithMarker(text: string, maxChars: number, wasTruncated: boolean): string {
-	if (!wasTruncated && text.length <= maxChars) return text;
-	return `${text.slice(0, maxChars)}\n[... output truncated at ${maxChars} chars ...]`;
+/**
+ * Cap one output channel, and name what the cut cost.
+ *
+ * The marker is written for the model that has to keep working after it: the cap, the size of what
+ * fell off, and the two ways to get that text back. A bare "...truncated..." says something was
+ * lost without saying whether the answer is to print a slice, page through it, or read a file.
+ */
+export function truncateWithMarker(text: string, maxChars: number, wasTruncated: boolean, dropped = 0): string {
+	const hidden = dropped + Math.max(0, text.length - maxChars);
+	if (!wasTruncated && hidden <= 0) return text;
+	return (
+		`${text.slice(0, maxChars)}\n` +
+		`[... output truncated at ${maxChars} chars, ${hidden} dropped — print the slice you need, ` +
+		"or write it to a file and read it back ...]"
+	);
 }
 
 export function capLinesForContext(text: string): { text: string; trimmed: boolean } {
@@ -496,10 +508,11 @@ export class EngineManager {
 				});
 				const status: ExecuteResult["status"] = opts.signal?.aborted ? "aborted" : r.status;
 				// Channel cap (truncateWithMarker), then per-line cap; both append a marker so truncation is explicit.
-				const finalize = (text: string, channelTruncated: boolean): string => {
-					let out = truncateWithMarker(text, maxChars, channelTruncated);
+				const finalize = (text: string, channelTruncated: boolean, channelDropped = 0): string => {
+					let out = truncateWithMarker(text, maxChars, channelTruncated, channelDropped);
 					const line = capLinesForContext(out);
-					if (line.trimmed) out = `${line.text}\n[... some lines exceeded ${MAX_OUTPUT_LINE_CHARS} chars ...]`;
+					if (line.trimmed)
+						out = `${line.text}\n[... some lines exceeded ${MAX_OUTPUT_LINE_CHARS} chars and were cut — slice the value or print it in chunks ...]`;
 					else out = line.text;
 					return out;
 				};
@@ -513,8 +526,8 @@ export class EngineManager {
 						}
 					: undefined;
 				return {
-					stdout: finalize(r.stdout, r.truncated?.stdout ?? false),
-					stderr: finalize(r.stderr, r.truncated?.stderr ?? false),
+					stdout: finalize(r.stdout, r.truncated?.stdout ?? false, r.truncated?.stdoutDropped ?? 0),
+					stderr: finalize(r.stderr, r.truncated?.stderr ?? false, r.truncated?.stderrDropped ?? 0),
 					result: r.result !== undefined ? finalize(String(r.result), String(r.result).length > maxChars) : undefined,
 					error: reapedError ?? r.error,
 					status,
